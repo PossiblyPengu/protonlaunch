@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=ProtonLaunch
+Comment=Install and launch Windows games on Steam Deck
+Exec=python3 /home/deck/.local/share/protonlaunch/protonlaunch.py
+Icon=applications-games
+Terminal=false
+Type=Application
+Categories=Game;
+StartupNotify=true
