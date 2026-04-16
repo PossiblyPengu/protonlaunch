@@ -1,58 +1,68 @@
-# ⚡ ProtonLaunch
+# ⚡ ProtonLaunch — Steam Deck Edition
 
-Install and launch Windows games on Steam Deck with one click.
+A streamlined Windows game installer optimized for Steam Deck. Search, configure, install, and add to Steam — all with a touch-friendly interface designed for 1280×800.
 
 ## Features
 
-- Browse and run any Windows `.exe` installer
-- Choose from any detected Proton version (stock or Proton-GE)
-- Falls back to system Wine if available
-- Per-game compatibility flags: DXVK, VKD3D, ESync, FSync, MangoHud
-- Isolated Wine prefix per game (no conflicts between games)
-- Launch games directly from the app
-- Add games to Steam as shortcuts (Game Mode friendly)
+- **Steam Deck Optimized** — Native 1280×800 resolution, touch-friendly UI
+- **One-Flow Install** — Search game → Pick EXE → Configure → Install → Add to Steam
+- **Auto-Detect Proton** — Stock Proton, Proton-GE, or system Wine
+- **Compatibility Flags** — DXVK, VKD3D, ESync, FSync, MangoHud
+- **Isolated Prefixes** — Each game gets its own Wine prefix
+- **Steam Integration** — One-click add to Steam library with cover art
 
 ## Requirements
 
-- Steam Deck (SteamOS) or any Linux distro
+- Steam Deck (SteamOS) or Linux with 1280×800 or higher resolution
 - Proton installed via Steam **or** Proton-GE in `~/.steam/root/compatibilitytools.d/`
 - Python 3.10+
-- PyQt6
+- PyQt6 (`sudo pacman -S python-pyqt6` on Steam Deck)
 
-## Install
+## Quick Start
+
+```bash
+cd /path/to/protonlaunch
+python3 -m protonlaunch.protonlaunch
+```
+
+Or add to Steam for Game Mode access:
+
+1. Click **"⚙ Add Tool to Steam"** in the app
+2. Restart Steam
+3. Launch directly from Game Mode
+
+## Install (Optional)
 
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
 
-Then run `protonlaunch` in a terminal, or find it in your app menu.
+## How to Use
 
-## Adding to Steam Game Mode
-
-After installing:
-1. Open Steam → **Add a Game → Add a Non-Steam Game**
-2. Browse to `~/.local/bin/protonlaunch`
-3. Add it — it'll appear in your library and launch from Game Mode
+1. **Install Game** — Search for your game on Steam (for cover art), browse to your `.exe` installer
+2. **Configure** — Select Proton version, enable compatibility flags
+3. **Run Installer** — The Windows installer runs through Proton
+4. **Add to Steam** — One click adds the game to your Steam library with proper artwork
 
 ## Compatibility Flags
 
-| Flag     | When to use |
-|----------|-------------|
-| DXVK     | Most DX9/10/11 games — huge performance boost |
-| VKD3D    | DX12 games |
-| ESync    | Most games — reduces CPU overhead |
-| FSync    | Linux 5.16+ kernel, even better than ESync |
-| MangoHud | Performance overlay (requires MangoHud installed) |
+| Flag | Description | Recommended For |
+| :--- | :--- | :--- |
+| **DXVK** | DirectX 9/10/11 → Vulkan | Most games (enabled by default) |
+| **VKD3D** | DirectX 12 → Vulkan | Modern DX12 titles |
+| **ESync** | Event synchronization | Better CPU performance (default) |
+| **FSync** | Fast synchronization | Linux 5.16+ kernels |
+| **MangoHud** | Performance overlay | FPS/performance monitoring |
 
-## Proton-GE
+## Proton-GE (Recommended)
 
-For better game compatibility, install [Proton-GE](https://github.com/GloriousEggroll/proton-ge-custom):
+For maximum compatibility, install Proton-GE:
 
 ```bash
-# Using ProtonUp-Qt (recommended)
+# Using ProtonUp-Qt
 flatpak install flathub net.davidotek.pupgui2
 flatpak run net.davidotek.pupgui2
 ```
 
-ProtonLaunch will automatically detect any GE versions you install.
+ProtonLaunch auto-detects all installed Proton versions.

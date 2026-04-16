@@ -65,17 +65,6 @@ def find_proton_versions(steam_dir: Path, proton_ge_dir: Path) -> dict:
         versions["System Wine"] = wine
     return versions
 
-def load_games(config_file: Path) -> list:
-    if config_file.exists():
-        try:
-            return json.loads(config_file.read_text())
-        except Exception:
-            pass
-    return []
-
-def save_games(games: list, config_file: Path):
-    config_file.write_text(json.dumps(games, indent=2))
-
 def build_launcher_script(game: dict, prefixes_dir: Path, data_dir: Path, steam_dir: Path) -> str:
     prefix = prefixes_dir / game["id"]
     prefix.mkdir(parents=True, exist_ok=True)
