@@ -2,6 +2,7 @@
 """Comprehensive test of ProtonLaunch components"""
 import sys
 import os
+import tempfile
 # Use local path for testing
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

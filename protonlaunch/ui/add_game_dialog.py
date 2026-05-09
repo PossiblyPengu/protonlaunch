@@ -186,24 +186,27 @@ class AddGameDialog(QDialog):
         self._search_worker.start()
 
     def _on_search_results(self, results):
-        self.search_btn.setText("🔍 Search"); self.search_btn.setEnabled(True)
+        self.search_btn.setText("🔍 Search stores"); self.search_btn.setEnabled(True)
         self.results_list.clear()
         if not results:
             QListWidgetItem("No results found", self.results_list)
             return
         for item in results:
-            li = QListWidgetItem(item.get("name", "Unknown"))
+            name = item.get("name", "Unknown")
+            suffix = item.get("display_suffix") or ""
+            label = f"{name}  ·  {suffix}" if suffix else name
+            li = QListWidgetItem(label)
             li.setData(Qt.ItemDataRole.UserRole, item)
             self.results_list.addItem(li)
         self.results_list.setCurrentRow(0)
 
     def _on_result_selected(self, current, _previous):
         if not current: return
-        data = current.data(Qt.ItemDataRole.UserRole)
-        if not data: return
-        self.name_input.setText(data.get("name", self.name_input.text()))
+        pick = current.data(Qt.ItemDataRole.UserRole)
+        if not pick: return
+        self.name_input.setText(pick.get("name", self.name_input.text()))
         self.meta_info.setText("Fetching details…")
-        self._details_worker = DetailsWorker(data["id"], self.covers_dir)
+        self._details_worker = DetailsWorker(pick, self.covers_dir)
         self._details_worker.ready.connect(self._on_details_ready)
         self._details_worker.start()
 
