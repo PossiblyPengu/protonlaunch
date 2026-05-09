@@ -4,6 +4,7 @@ import re
 import shutil
 import struct
 import subprocess
+from io import BytesIO
 import urllib.request
 import urllib.parse
 import zlib
@@ -54,13 +55,139 @@ def steam_shortcut_appid(name: str, exe: str) -> int:
     # Avoid 0; some Steam clients treat it oddly
     return h if h else 1
 
+
+def enumerate_steam_userdata_config_dirs(primary_steam_root: Path | None = None) -> list[Path]:
+    """
+    All Steam userdata/*/config directories (native + common symlinks + Flatpak).
+    """
+    seen: set[Path] = set()
+    out: list[Path] = []
+    candidates: list[Path] = []
+    if primary_steam_root is not None:
+        candidates.append(Path(primary_steam_root))
+    home = Path.home()
+    candidates.extend(
+        [
+            home / ".local/share/Steam",
+            home / ".steam/steam",
+            home / ".steam/root",
+            home / ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+        ]
+    )
+    for raw in candidates:
+        try:
+            root = raw.expanduser().resolve()
+        except OSError:
+            continue
+        ud = root / "userdata"
+        if not ud.is_dir():
+            continue
+        for cfg in ud.glob("*/config"):
+            if not cfg.is_dir():
+                continue
+            try:
+                key = cfg.resolve()
+            except OSError:
+                continue
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
+
+
+_EXE_NAME_SKIP_SUBSTR = (
+    "uninstall",
+    "unins",
+    "vc_redist",
+    "vcredist",
+    "dotnet",
+    "dxsetup",
+    "unitycrashhandler",
+    "crashhandler",
+    "redist",
+    "setup",
+    "install",
+)
+_WALK_CAP = 12000
+
+
+def scan_prefix_for_game_exes(
+    wine_prefix: Path,
+    installer_exe: str | Path | None = None,
+    max_results: int = 50,
+) -> list[str]:
+    """
+    Heuristic scan of drive_c for likely game executables (newest first).
+    Skips Windows system trees and common redistributable names.
+    """
+    wine_prefix = Path(wine_prefix)
+    drive_c = wine_prefix / "drive_c"
+    root = drive_c if drive_c.is_dir() else wine_prefix
+    if not root.is_dir():
+        return []
+    inst_name = Path(installer_exe).name.lower() if installer_exe else ""
+
+    hits: list[tuple[float, str]] = []
+    walked = 0
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True):
+        norm = Path(dirpath).as_posix().lower()
+        if "/windows/" in norm or norm.endswith("/windows"):
+            dirnames[:] = []
+            continue
+        if "/winsxs/" in norm or "/syswow64/" in norm or "/system32/" in norm:
+            dirnames[:] = []
+            continue
+
+        for fn in filenames:
+            if walked >= _WALK_CAP:
+                break
+            walked += 1
+            if not fn.lower().endswith(".exe"):
+                continue
+            pl = Path(dirpath) / fn
+            nlow = fn.lower()
+            if inst_name and nlow == inst_name:
+                continue
+            stem = Path(fn).stem.lower()
+            if any(x in stem for x in _EXE_NAME_SKIP_SUBSTR) or any(
+                x in nlow for x in _EXE_NAME_SKIP_SUBSTR
+            ):
+                continue
+            try:
+                mt = pl.stat().st_mtime
+            except OSError:
+                continue
+            try:
+                resolved = str(pl.resolve())
+            except OSError:
+                resolved = str(pl)
+            hits.append((mt, resolved))
+
+        if walked >= _WALK_CAP:
+            break
+
+    hits.sort(key=lambda t: t[0], reverse=True)
+    return [p for _mt, p in hits[:max_results]]
+
+
+def parse_winetricks_verbs_field(text: str, default: list[str] | None = None) -> list[str]:
+    """Parse comma/semicolon-separated winetricks verbs; empty input uses default list."""
+    base = list(default or DEFAULT_WINETRICKS_VERBS)
+    t = (text or "").strip()
+    if not t:
+        return base
+    parts = [x.strip() for x in re.split(r"[,;]+", t) if x.strip()]
+    return parts if parts else base
+
+
 # ── Paths (imported from main if needed) ──
 # These should be passed in or imported as needed
 
-def steam_search(query: str) -> list:
+def steam_search_with_status(query: str) -> tuple[list, str]:
+    """Return (items, error_message). error_message is empty on success."""
     q = (query or "").strip()
     if not q:
-        return []
+        return [], ""
     url = "https://store.steampowered.com/api/storesearch/?" + urllib.parse.urlencode(
         {"term": q, "l": "english", "cc": "US", "json": 1}
     )
@@ -77,9 +204,14 @@ def steam_search(query: str) -> list:
         )
         with urllib.request.urlopen(req, timeout=8) as r:
             data = json.loads(r.read().decode("utf-8", errors="replace"))
-            return data.get("items", []) or []
-    except Exception:
-        return []
+            return data.get("items", []) or [], ""
+    except Exception as e:
+        return [], str(e)
+
+
+def steam_search(query: str) -> list:
+    items, _ = steam_search_with_status(query)
+    return items
 
 
 # Friendly names for Lutris provider_games.service values
@@ -102,14 +234,14 @@ _LUTRIS_STORE_LABELS = {
 }
 
 
-def lutris_search(query: str, limit: int = 12) -> list[dict]:
+def lutris_search_with_status(query: str, limit: int = 12) -> tuple[list[dict], str]:
     """
     Search Lutris.net (aggregates Steam, GOG, Epic, Amazon, Humble, Battle.net, etc.).
-    Each hit may include a linked Steam app id for ProtonDB / Steam store metadata.
+    Returns (results, error_message).
     """
     q = (query or "").strip()
     if not q:
-        return []
+        return [], ""
     url = "https://lutris.net/api/games?" + urllib.parse.urlencode(
         {"search": q, "page_size": min(max(limit, 1), 50)}
     )
@@ -117,8 +249,8 @@ def lutris_search(query: str, limit: int = 12) -> list[dict]:
         req = urllib.request.Request(url, headers={"User-Agent": "ProtonLaunch/1.3"})
         with urllib.request.urlopen(req, timeout=14) as r:
             data = json.loads(r.read().decode())
-    except Exception:
-        return []
+    except Exception as e:
+        return [], str(e)
 
     out: list[dict] = []
     for g in (data.get("results") or [])[:limit]:
@@ -160,22 +292,44 @@ def lutris_search(query: str, limit: int = 12) -> list[dict]:
                 ],
             }
         )
-    return out
+    return out, ""
 
 
-def combined_store_search(
+def lutris_search(query: str, limit: int = 12) -> list[dict]:
+    items, _ = lutris_search_with_status(query, limit)
+    return items
+
+
+def combined_store_search_with_diagnostics(
     query: str,
     max_steam: int = 6,
     max_lutris: int = 10,
-) -> list[dict]:
-    """Merge Steam store search with Lutris (multi-platform) hits; dedupe by Steam app id."""
+) -> tuple[list[dict], dict]:
+    """
+    Merge Steam + Lutris hits; dedupe by Steam app id.
+    Second return value has keys steam_ok, steam_count, steam_error, lutris_ok, lutris_count, lutris_error.
+    """
     q = (query or "").strip()
+    diag: dict = {
+        "steam_ok": False,
+        "steam_count": 0,
+        "steam_error": "",
+        "lutris_ok": False,
+        "lutris_count": 0,
+        "lutris_error": "",
+    }
     if not q:
-        return []
+        return [], diag
+
     merged: list[dict] = []
     steam_ids: set[int] = set()
 
-    for it in steam_search(q)[:max_steam]:
+    steam_items, steam_err = steam_search_with_status(q)
+    diag["steam_error"] = steam_err or ""
+    diag["steam_ok"] = not steam_err
+    diag["steam_count"] = len(steam_items)
+
+    for it in steam_items[:max_steam]:
         sid = it.get("id")
         try:
             sid_int = int(sid) if sid is not None else None
@@ -192,13 +346,28 @@ def combined_store_search(
             }
         )
 
-    for hit in lutris_search(q, limit=max_lutris + len(steam_ids)):
+    lut_hits, lut_err = lutris_search_with_status(q, limit=max_lutris + len(steam_ids))
+    diag["lutris_error"] = lut_err or ""
+    diag["lutris_ok"] = not lut_err
+    diag["lutris_count"] = len(lut_hits)
+
+    for hit in lut_hits:
         lsid = hit.get("steam_appid")
         if lsid is not None and lsid in steam_ids:
             continue
         merged.append(hit)
 
-    return merged[: max_steam + max_lutris]
+    return merged[: max_steam + max_lutris], diag
+
+
+def combined_store_search(
+    query: str,
+    max_steam: int = 6,
+    max_lutris: int = 10,
+) -> list[dict]:
+    """Merge Steam store search with Lutris (multi-platform) hits; dedupe by Steam app id."""
+    results, _diag = combined_store_search_with_diagnostics(query, max_steam, max_lutris)
+    return results
 
 
 def download_cover_from_url(url: str, dest: Path) -> str:
@@ -510,6 +679,100 @@ def build_launcher_script(game: dict, prefixes_dir: Path, data_dir: Path, steam_
     script_path.chmod(0o755)
     return str(script_path)
 
+def _try_append_shortcut_vdf(
+    shortcuts_file: Path,
+    name: str,
+    exe: str,
+    icon: str,
+    launch_options: str,
+) -> bool:
+    """Merge a non-Steam shortcut using ValvePython vdf when available."""
+    try:
+        import vdf  # type: ignore
+    except ImportError:
+        return False
+    appid = steam_shortcut_appid(name, exe)
+    # vdf.binary_dump is happiest with string values for shortcut entries.
+    entry = {
+        "appid": str(appid),
+        "AppName": name,
+        "Exe": f'"{exe}"',
+        "StartDir": str(Path(exe).parent),
+        "icon": icon or "",
+        "ShortcutPath": "",
+        "LaunchOptions": launch_options or "",
+        "IsHidden": "0",
+        "AllowDesktopConfig": "1",
+        "AllowOverlay": "1",
+        "OpenVR": "0",
+        "LastPlayTime": "0",
+    }
+    try:
+        if shortcuts_file.exists():
+            raw = shortcuts_file.read_bytes()
+            data = vdf.binary_load(BytesIO(raw), raise_on_remaining=False)
+        else:
+            data = {}
+        sc = data.get("shortcuts")
+        if sc is None or not isinstance(sc, dict):
+            sc = {}
+            data["shortcuts"] = sc
+        next_i = 0
+        for k in sc.keys():
+            ks = str(k)
+            if ks.isdigit():
+                next_i = max(next_i, int(ks) + 1)
+        sc[str(next_i)] = entry
+        shortcuts_file.parent.mkdir(parents=True, exist_ok=True)
+        buf = BytesIO()
+        vdf.binary_dump(data, buf)
+        shortcuts_file.write_bytes(buf.getvalue())
+        return True
+    except Exception:
+        return False
+
+
+def _append_shortcut_binary_legacy(
+    shortcuts_file: Path,
+    name: str,
+    exe: str,
+    icon: str,
+    launch_options: str,
+) -> None:
+    def s(key, val):
+        return b"\x01" + key.encode() + b"\x00" + val.encode("utf-8") + b"\x00"
+
+    def u(key, val):
+        return b"\x02" + key.encode() + b"\x00" + struct.pack("<I", val & 0xFFFFFFFF)
+
+    appid = steam_shortcut_appid(name, exe)
+    body = (
+        u("appid", appid)
+        + s("AppName", name)
+        + s("Exe", f'"{exe}"')
+        + s("StartDir", str(Path(exe).parent))
+        + s("icon", icon)
+        + s("ShortcutPath", "")
+        + s("LaunchOptions", launch_options)
+        + u("IsHidden", 0)
+        + u("AllowDesktopConfig", 1)
+        + u("AllowOverlay", 1)
+        + u("OpenVR", 0)
+        + u("LastPlayTime", 0)
+        + b"\x08"
+    )
+    shortcuts_file.parent.mkdir(parents=True, exist_ok=True)
+    if shortcuts_file.exists():
+        raw = shortcuts_file.read_bytes()
+        idx = raw.count(b"AppName\x00")
+        entry = b"\x00" + str(idx).encode() + b"\x00" + body
+        raw = raw.rstrip(b"\x08")
+        shortcuts_file.write_bytes(raw + entry + b"\x08")
+    else:
+        entry = b"\x00" + b"0" + b"\x00" + body
+        shortcuts_file.write_bytes(b"\x00shortcuts\x00" + entry + b"\x08")
+
+
 def write_steam_shortcut(
     name: str,
     exe: str,
@@ -517,42 +780,18 @@ def write_steam_shortcut(
     steam_dir: Path,
     launch_options: str = "",
 ) -> tuple:
-    userdata_dirs = list(steam_dir.glob("userdata/*/config/"))
+    userdata_dirs = enumerate_steam_userdata_config_dirs(steam_dir)
     if not userdata_dirs:
         return False, "No Steam userdata found. Is Steam installed and logged in?"
     for config_dir in userdata_dirs:
         shortcuts_file = config_dir / "shortcuts.vdf"
         try:
-            def s(key, val):
-                return b"\x01" + key.encode() + b"\x00" + val.encode("utf-8") + b"\x00"
-            def u(key, val):
-                return b"\x02" + key.encode() + b"\x00" + struct.pack("<I", val & 0xFFFFFFFF)
-
-            appid = steam_shortcut_appid(name, exe)
-            body = (
-                u("appid", appid) +
-                s("AppName", name) +
-                s("Exe", f'"{exe}"') +
-                s("StartDir", str(Path(exe).parent)) +
-                s("icon", icon) +
-                s("ShortcutPath", "") +
-                s("LaunchOptions", launch_options) +
-                u("IsHidden", 0) +
-                u("AllowDesktopConfig", 1) +
-                u("AllowOverlay", 1) +
-                u("OpenVR", 0) +
-                u("LastPlayTime", 0) +
-                b"\x08"
-            )
-            if shortcuts_file.exists():
-                raw = shortcuts_file.read_bytes()
-                idx = raw.count(b"AppName\x00")
-                entry = b"\x00" + str(idx).encode() + b"\x00" + body
-                raw = raw.rstrip(b"\x08")
-                shortcuts_file.write_bytes(raw + entry + b"\x08")
-            else:
-                entry = b"\x00" + b"0" + b"\x00" + body
-                shortcuts_file.write_bytes(b"\x00shortcuts\x00" + entry + b"\x08")
+            if not _try_append_shortcut_vdf(
+                shortcuts_file, name, exe, icon, launch_options
+            ):
+                _append_shortcut_binary_legacy(
+                    shortcuts_file, name, exe, icon, launch_options
+                )
             return True, "Added! Restart Steam to see it in your library."
         except Exception as e:
             return False, str(e)

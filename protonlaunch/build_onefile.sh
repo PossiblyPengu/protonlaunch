@@ -8,7 +8,8 @@ ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 echo "=== Building ProtonLaunch onefile binary ==="
 echo "Project root: $ROOT_DIR"
 
-/usr/bin/python3 -m pip install --user --upgrade pyinstaller PyQt6 requests
+/usr/bin/python3 -m pip install --user --upgrade pip
+/usr/bin/python3 -m pip install --user --upgrade -r "$ROOT_DIR/requirements.txt" pyinstaller
 
 cd "$ROOT_DIR"
 /usr/bin/python3 -m PyInstaller \
@@ -18,6 +19,8 @@ cd "$ROOT_DIR"
   --name protonlaunch \
   --paths "$ROOT_DIR" \
   --hidden-import PyQt6.sip \
+  --hidden-import vdf \
+  --add-data "protonlaunch/VERSION:protonlaunch" \
   protonlaunch/protonlaunch.py
 
 mkdir -p "$SCRIPT_DIR/dist"

@@ -8,6 +8,7 @@ import os
 import time
 import shutil
 import re
+import shlex
 from pathlib import Path
 try:
     from PyQt6.QtWidgets import (
@@ -32,6 +33,8 @@ try:
         QScrollArea,
         QSizePolicy,
         QGridLayout,
+        QDialog,
+        QDialogButtonBox,
     )
     from PyQt6.QtCore import Qt, QUrl
     from PyQt6.QtGui import QPixmap, QFont, QGuiApplication, QDesktopServices
@@ -57,6 +60,8 @@ from protonlaunch.helpers.helpers import (
     recommend_proton_key,
     winetricks_available,
     DEFAULT_WINETRICKS_VERBS,
+    parse_winetricks_verbs_field,
+    scan_prefix_for_game_exes,
 )
 from protonlaunch.logic.workers import InstallerWorker, SearchWorker, DetailsWorker
 
@@ -68,14 +73,33 @@ COVERS_DIR = DATA_DIR / "covers"
 _STEAM_ROOT = resolve_steam_root()
 STEAM_DIR = _STEAM_ROOT if _STEAM_ROOT is not None else (HOME / ".steam" / "steam")
 PROTON_GE_DIR = STEAM_DIR / "compatibilitytools.d"
-SELF_SCRIPT = Path(__file__).resolve()
+SELF_SCRIPT = (
+    Path(sys.executable).resolve()
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve()
+)
 # Steam Game Mode often provides a minimal PATH; prefer SteamOS system Python.
 PYTHON_FOR_STEAM = "/usr/bin/python3" if Path("/usr/bin/python3").is_file() else shutil.which("python3") or "python3"
 
-for d in (DATA_DIR, PREFIXES_DIR, COVERS_DIR):
+for d in (DATA_DIR, PREFIXES_DIR, COVERS_DIR, DATA_DIR / "logs"):
     d.mkdir(parents=True, exist_ok=True)
 
-APP_VERSION = "1.3"
+
+def _read_app_version() -> str:
+    if getattr(sys, "frozen", False):
+        bases = [Path(getattr(sys, "_MEIPASS", ".")), Path(__file__).resolve().parent]
+    else:
+        bases = [Path(__file__).resolve().parent]
+    for base in bases:
+        for vf in (base / "VERSION", base / "protonlaunch" / "VERSION"):
+            try:
+                return vf.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+    return "0.0.0"
+
+
+APP_VERSION = _read_app_version()
 
 # ── Stylesheet: deck-first, high contrast, teal + violet accents ─────────────
 STYLE = """
@@ -331,6 +355,31 @@ QProgressDialog QLabel { color: #c8c8d8; font-size: 14px; }
 """
 
 
+class InstallerDropFrame(QFrame):
+    """Accept .exe drops for the installer step."""
+
+    def __init__(self, parent, on_exe_path):
+        super().__init__(parent)
+        self.setObjectName("dropZone")
+        self._on_exe_path = on_exe_path
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(".exe"):
+                self._on_exe_path(path)
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+
 def _wrap_scroll(inner: QWidget) -> QScrollArea:
     scroll = QScrollArea()
     scroll.setWidgetResizable(True)
@@ -492,8 +541,7 @@ class ProtonLaunch(QMainWindow):
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
-        self.drop_zone = QFrame()
-        self.drop_zone.setObjectName("dropZone")
+        self.drop_zone = InstallerDropFrame(self, self._apply_installer_path)
         self.drop_zone.setMinimumHeight(140)
         dz_lay = QVBoxLayout(self.drop_zone)
         dz_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -539,6 +587,11 @@ class ProtonLaunch(QMainWindow):
         self.search_btn.clicked.connect(self._do_search)
         search_row.addWidget(self.search_btn)
         layout.addLayout(search_row)
+
+        self.search_diag_label = QLabel("")
+        self.search_diag_label.setObjectName("sectionHint")
+        self.search_diag_label.setWordWrap(True)
+        layout.addWidget(self.search_diag_label)
 
         self.results_list = QListWidget()
         self.results_list.setMinimumHeight(100)
@@ -644,6 +697,15 @@ class ProtonLaunch(QMainWindow):
             )
         grid.addWidget(self.winetricks_cb, 3, 0)
 
+        wt_extra_l = QLabel("Extra winetricks verbs (optional, comma-separated)")
+        wt_extra_l.setObjectName("metaLine")
+        grid.addWidget(wt_extra_l, 4, 0)
+        default_verbs = ", ".join(DEFAULT_WINETRICKS_VERBS)
+        self.winetricks_verbs_edit = QLineEdit()
+        self.winetricks_verbs_edit.setPlaceholderText(default_verbs)
+        self.winetricks_verbs_edit.setText(default_verbs)
+        grid.addWidget(self.winetricks_verbs_edit, 5, 0)
+
         flags_label = QLabel("Runtime flags")
         flags_label.setObjectName("metaLine")
         grid.addWidget(flags_label, 0, 1)
@@ -661,12 +723,13 @@ class ProtonLaunch(QMainWindow):
         flags_inner.addWidget(self.esync_cb, 1, 0)
         flags_inner.addWidget(self.fsync_cb, 1, 1)
         flags_inner.addWidget(self.hud_cb, 2, 0)
-        grid.addLayout(flags_inner, 1, 1, 3, 1)
+        grid.addLayout(flags_inner, 1, 1, 6, 1)
         layout.addLayout(grid)
 
         for w in (
             self.proton_combo,
             self.winetricks_cb,
+            self.winetricks_verbs_edit,
             self.dxvk_cb,
             self.vkd3d_cb,
             self.esync_cb,
@@ -675,14 +738,17 @@ class ProtonLaunch(QMainWindow):
         ):
             if hasattr(w, "currentIndexChanged"):
                 w.currentIndexChanged.connect(lambda _i: self._refresh_install_summary())
-            else:
+            elif hasattr(w, "toggled"):
                 w.toggled.connect(self._refresh_install_summary)
+            else:
+                w.textChanged.connect(self._refresh_install_summary)
 
         lo_label = QLabel("Extra Steam launch options (optional)")
         lo_label.setObjectName("metaLine")
         layout.addWidget(lo_label)
         self.launch_opts = QLineEdit()
         self.launch_opts.setPlaceholderText("e.g. DXVK_ASYNC=1 %command% — only if you know you need them")
+        self.launch_opts.textChanged.connect(self._refresh_install_summary)
         layout.addWidget(self.launch_opts)
 
         layout.addStretch()
@@ -778,10 +844,9 @@ class ProtonLaunch(QMainWindow):
         if lo:
             lines.append(f"Steam options: {lo}")
         if self.winetricks_cb.isChecked() and winetricks_available():
+            verbs = parse_winetricks_verbs_field(self.winetricks_verbs_edit.text())
             lines.append(
-                "Prefix prep: winetricks "
-                + ", ".join(DEFAULT_WINETRICKS_VERBS)
-                + " (before installer)"
+                "Prefix prep: winetricks " + ", ".join(verbs) + " (before installer)"
             )
         elif self.winetricks_cb.isChecked():
             lines.append("Prefix prep: winetricks requested but winetricks not found on PATH")
@@ -862,10 +927,30 @@ class ProtonLaunch(QMainWindow):
         self._search_worker.results_ready.connect(self._on_search_results)
         self._search_worker.start()
 
-    def _on_search_results(self, results):
+    def _format_search_diag(self, diag: dict) -> str:
+        if not diag:
+            return ""
+        se = (diag.get("steam_error") or "").strip()
+        le = (diag.get("lutris_error") or "").strip()
+        sc = int(diag.get("steam_count") or 0)
+        lc = int(diag.get("lutris_count") or 0)
+        if se:
+            sm = se if len(se) <= 140 else se[:137] + "…"
+            steam_bit = f"Steam: failed ({sm})"
+        else:
+            steam_bit = f"Steam: OK ({sc} hits)"
+        if le:
+            lm = le if len(le) <= 140 else le[:137] + "…"
+            lut_bit = f"Lutris: failed ({lm})"
+        else:
+            lut_bit = f"Lutris: OK ({lc} hits)"
+        return f"{steam_bit}  ·  {lut_bit}"
+
+    def _on_search_results(self, results, diag=None):
         self.search_btn.setText("Search stores")
         self.search_btn.setEnabled(True)
         self.results_list.clear()
+        self.search_diag_label.setText(self._format_search_diag(diag or {}))
         self.protondb_tier_label.setText("Select a listing — Steam rows load ProtonDB; others may link Steam via Lutris.")
         self.protondb_note_label.setText("")
         self.apply_suggest_btn.setEnabled(False)
@@ -966,25 +1051,36 @@ class ProtonLaunch(QMainWindow):
             self.drop_zone.style().unpolish(self.drop_zone)
             self.drop_zone.style().polish(self.drop_zone)
 
+    def _apply_installer_path(self, path: str):
+        path = (path or "").strip()
+        if not path.lower().endswith(".exe"):
+            QMessageBox.warning(self, "Not an installer", "Please choose a Windows .exe file.")
+            return
+        if not Path(path).is_file():
+            QMessageBox.warning(self, "Missing file", "That path does not exist.")
+            return
+        self.exe_path = path
+        self.exe_label.setText(Path(path).name)
+        self.exe_label.setObjectName("")
+        self.exe_label.setStyleSheet("color: #5eead4; font-size: 15px; font-weight: 600;")
+        self._set_drop_zone_state(True)
+        if hasattr(self, "name_input") and not self.name_input.text():
+            stem = re.sub(
+                r"setup|install|installer",
+                "",
+                re.sub(r"[_\-\.]+", " ", Path(path).stem),
+                flags=re.IGNORECASE,
+            ).strip()
+            self.name_input.setText(stem.title())
+        if hasattr(self, "name_input"):
+            self._do_search()
+
     def _browse_exe(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Installer", str(Path.home()), "Windows Executables (*.exe);;All Files (*)"
         )
         if path:
-            self.exe_path = path
-            self.exe_label.setText(Path(path).name)
-            self.exe_label.setObjectName("")
-            self.exe_label.setStyleSheet("color: #5eead4; font-size: 15px; font-weight: 600;")
-            self._set_drop_zone_state(True)
-            if not self.name_input.text():
-                stem = re.sub(
-                    r"setup|install|installer",
-                    "",
-                    re.sub(r"[_\-\.]+", " ", Path(path).stem),
-                    flags=re.IGNORECASE,
-                ).strip()
-                self.name_input.setText(stem.title())
-            self._do_search()
+            self._apply_installer_path(path)
 
     def _run_install(self):
         if not self._validate_setup():
@@ -1009,7 +1105,7 @@ class ProtonLaunch(QMainWindow):
             "mangohud": self.hud_cb.isChecked(),
             "steam_launch_options": self.launch_opts.text().strip(),
             "install_winetricks": self.winetricks_cb.isChecked() and winetricks_available(),
-            "winetricks_verbs": list(DEFAULT_WINETRICKS_VERBS),
+            "winetricks_verbs": parse_winetricks_verbs_field(self.winetricks_verbs_edit.text()),
         }
 
         uid = re.sub(r"\W+", "_", name.lower()).strip("_")
@@ -1035,13 +1131,17 @@ class ProtonLaunch(QMainWindow):
         self._progress.show()
         if not Path(game["proton_bin"]).is_file() or not Path(game["exe"]).is_file():
             self._progress.close()
+            self.install_btn.setEnabled(True)
+            self.install_btn.setText("Run Windows installer")
             QMessageBox.critical(
                 self,
                 "Invalid executable",
                 "The selected Proton/Wine binary or installer file is missing.",
             )
             return
-        self.worker = InstallerWorker(game, PREFIXES_DIR, STEAM_DIR)
+        log_path = DATA_DIR / "logs" / f"{game['id']}.log"
+        game["install_log"] = str(log_path)
+        self.worker = InstallerWorker(game, PREFIXES_DIR, STEAM_DIR, str(log_path))
         self.worker.phase.connect(self._progress.setLabelText)
         self.worker.done.connect(lambda ok, msg: self._on_install_done(ok, msg, game))
         self.worker.start()
@@ -1049,18 +1149,65 @@ class ProtonLaunch(QMainWindow):
     def _pick_installed_exe(self, game) -> str | None:
         prefix_root = PREFIXES_DIR / game["id"]
         _compat, wine_pfx = resolve_prefix_layout(prefix_root)
-        start_dir = wine_pfx / "drive_c"
-        start = str(start_dir if start_dir.exists() else Path.home())
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select installed game executable",
-            start,
-            "Windows Executables (*.exe);;All Files (*)",
+        candidates = scan_prefix_for_game_exes(
+            wine_pfx, game.get("installer_exe"), max_results=60
         )
-        picked = (path or "").strip()
-        if not picked:
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Select installed game .exe")
+        dlg.setMinimumWidth(520)
+        vl = QVBoxLayout(dlg)
+        vl.addWidget(
+            QLabel(
+                "Pick the game’s main executable (not the installer). "
+                "Suggestions are sorted by recent changes; use Browse if the list is wrong."
+            )
+        )
+        lw = QListWidget()
+        for p in candidates:
+            lw.addItem(p)
+        vl.addWidget(lw)
+
+        result: list[str | None] = [None]
+
+        def on_ok():
+            it = lw.currentItem()
+            if it and it.text().strip():
+                result[0] = it.text().strip()
+            dlg.accept()
+
+        def on_browse():
+            start_dir = wine_pfx / "drive_c"
+            start = str(start_dir if start_dir.exists() else Path.home())
+            path, _ = QFileDialog.getOpenFileName(
+                dlg,
+                "Browse for game .exe",
+                start,
+                "Windows Executables (*.exe);;All Files (*)",
+            )
+            if path:
+                result[0] = path.strip()
+                dlg.accept()
+
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(on_browse)
+        row = QHBoxLayout()
+        row.addWidget(browse_btn)
+        row.addStretch()
+        vl.addLayout(row)
+
+        box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        box.accepted.connect(on_ok)
+        box.rejected.connect(dlg.reject)
+        vl.addWidget(box)
+
+        lw.itemDoubleClicked.connect(lambda _it: on_ok())
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return None
-        return picked
+        return result[0]
 
     def _on_install_done(self, ok, msg, game):
         self._progress.close()
@@ -1087,7 +1234,8 @@ class ProtonLaunch(QMainWindow):
                 f"“{game['name']}” installer finished.\n\n"
                 f"Launch target:\n{game['exe']}\n\n"
                 f"Launcher script:\n{launcher_script}\n\n"
-                f"Use “Add to Steam library” when you are ready.",
+                f"Use “Add to Steam library” when you are ready.\n\n"
+                f"Log: {game.get('install_log', '')}",
             )
         else:
             reply = QMessageBox.question(
@@ -1136,7 +1284,13 @@ class ProtonLaunch(QMainWindow):
 
     def _add_self_to_steam(self):
         launcher = DATA_DIR / "protonlaunch-launcher.sh"
-        launcher.write_text(f"#!/bin/bash\nexec {PYTHON_FOR_STEAM} '{SELF_SCRIPT}'\n")
+        if getattr(sys, "frozen", False):
+            exe_q = shlex.quote(str(Path(sys.executable).resolve()))
+            launcher.write_text(f"#!/bin/bash\nexec {exe_q} \"$@\"\n")
+        else:
+            py_q = shlex.quote(PYTHON_FOR_STEAM)
+            script_q = shlex.quote(str(SELF_SCRIPT))
+            launcher.write_text(f"#!/bin/bash\nexec {py_q} {script_q} \"$@\"\n")
         launcher.chmod(0o755)
         ok, msg = write_steam_shortcut("ProtonLaunch", str(launcher), "", STEAM_DIR)
         if ok:

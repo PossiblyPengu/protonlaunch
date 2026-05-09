@@ -185,7 +185,7 @@ class AddGameDialog(QDialog):
         self._search_worker.results_ready.connect(self._on_search_results)
         self._search_worker.start()
 
-    def _on_search_results(self, results):
+    def _on_search_results(self, results, _diag=None):
         self.search_btn.setText("🔍 Search stores"); self.search_btn.setEnabled(True)
         self.results_list.clear()
         if not results:

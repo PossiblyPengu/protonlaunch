@@ -23,9 +23,14 @@ if [ -x "$BINARY_SOURCE" ]; then
 else
     echo "No onefile binary found; installing Python source mode."
     echo "Checking Python dependencies..."
-    if ! /usr/bin/python3 -c "import PyQt6, requests" 2>/dev/null; then
-        echo "Installing user Python dependencies (PyQt6 + requests)..."
-        /usr/bin/python3 -m pip install --user PyQt6 requests
+    ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    REQ="$ROOT_DIR/requirements.txt"
+    if [ -f "$REQ" ]; then
+        echo "Installing from requirements.txt…"
+        /usr/bin/python3 -m pip install --user -r "$REQ"
+    elif ! /usr/bin/python3 -c "import PyQt6, requests, vdf" 2>/dev/null; then
+        echo "Installing user Python dependencies (PyQt6 + requests + vdf)…"
+        /usr/bin/python3 -m pip install --user PyQt6 requests vdf
     fi
 
     rm -rf "$INSTALL_DIR/protonlaunch"
