@@ -25,7 +25,9 @@ class MockQtWidgets:
     class QSpacerItem: pass
     class QMessageBox: pass
     class QFrame: pass
-    
+    class QScrollArea: pass
+    class QWidget: pass
+
 class MockQtCore:
     class Qt:
         class ItemDataRole:
@@ -59,14 +61,14 @@ sys.modules['PyQt6.QtGui'] = MockQtGui
 
 try:
     from protonlaunch.ui.add_game_dialog import AddGameDialog
-    print("  ✓ AddGameDialog imported")
+    print("  OK AddGameDialog imported")
 except Exception as e:
-    print(f"  ✗ AddGameDialog failed: {e}")
+    print(f"  FAIL AddGameDialog: {e}")
 
 try:
     from protonlaunch.logic.workers import SearchWorker, DetailsWorker, InstallerWorker
-    print("  ✓ All workers imported")
+    print("  OK All workers imported")
 except Exception as e:
-    print(f"  ✗ Workers failed: {e}")
+    print(f"  FAIL Workers: {e}")
 
 print("\nUI structure validated!")
