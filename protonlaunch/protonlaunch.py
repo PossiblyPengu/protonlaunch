@@ -9,31 +9,43 @@ import time
 import shutil
 import re
 from pathlib import Path
-from PyQt6.QtWidgets import (
-    QApplication,
-    QMainWindow,
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QPushButton,
-    QLabel,
-    QFrame,
-    QMessageBox,
-    QProgressDialog,
-    QLineEdit,
-    QComboBox,
-    QCheckBox,
-    QListWidget,
-    QListWidgetItem,
-    QTextEdit,
-    QFileDialog,
-    QStackedWidget,
-    QScrollArea,
-    QSizePolicy,
-    QGridLayout,
-)
-from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QPixmap, QFont, QGuiApplication, QDesktopServices
+try:
+    from PyQt6.QtWidgets import (
+        QApplication,
+        QMainWindow,
+        QWidget,
+        QVBoxLayout,
+        QHBoxLayout,
+        QPushButton,
+        QLabel,
+        QFrame,
+        QMessageBox,
+        QProgressDialog,
+        QLineEdit,
+        QComboBox,
+        QCheckBox,
+        QListWidget,
+        QListWidgetItem,
+        QTextEdit,
+        QFileDialog,
+        QStackedWidget,
+        QScrollArea,
+        QSizePolicy,
+        QGridLayout,
+    )
+    from PyQt6.QtCore import Qt, QUrl
+    from PyQt6.QtGui import QPixmap, QFont, QGuiApplication, QDesktopServices
+except ModuleNotFoundError as exc:
+    if getattr(exc, "name", "") == "PyQt6":
+        print(
+            "Missing dependency: PyQt6\n"
+            "Install it and retry:\n"
+            "  Windows: py -3 -m pip install PyQt6 requests\n"
+            "  SteamOS: sudo pacman -S python-pyqt6 python-requests",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    raise
 
 # Import helpers and logic modules
 from protonlaunch.helpers.helpers import (

@@ -38,6 +38,33 @@ chmod +x install.sh
 ./install.sh
 ```
 
+## Single-File Build (Steam Deck Recommended)
+
+Build a self-contained executable (no runtime Python package layout needed):
+
+```bash
+chmod +x build_onefile.sh
+./build_onefile.sh
+./install.sh
+```
+
+This creates `dist/protonlaunch` and installs it to `~/.local/bin/protonlaunch`.
+If no onefile binary is present, `install.sh` falls back to source/Python mode.
+
+## Download a Ready-to-Run Binary
+
+Tagged releases publish a single Linux binary in GitHub Releases:
+
+- `protonlaunch-linux-x86_64`
+- `protonlaunch-linux-x86_64.sha256`
+
+On Steam Deck:
+
+```bash
+chmod +x protonlaunch-linux-x86_64
+./protonlaunch-linux-x86_64
+```
+
 ## How to Use
 
 1. **Install Game** — Search for your game on Steam (for cover art), browse to your `.exe` installer
