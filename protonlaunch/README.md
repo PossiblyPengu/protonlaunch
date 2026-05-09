@@ -82,6 +82,8 @@ PYTHONIOENCODING=utf-8 python3 test_comprehensive.py
 QT_QPA_PLATFORM=offscreen python3 scripts/wsl_headless_smoke.py
 ```
 
+On minimal Linux images (including CI), PyQt6 needs EGL/GL runtime libraries, e.g. Debian/Ubuntu: `sudo apt-get install -y libegl1 libgl1 libglib2.0-0 libxkbcommon0 libdbus-1-3`.
+
 ## Compatibility Flags
 
 | Flag | Description | Recommended For |
