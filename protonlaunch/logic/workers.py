@@ -51,6 +51,27 @@ class DetailsWorker(QThread):
 
         store_label = pick.get("display_suffix", "")
 
+        if kind == "manual":
+            name = (pick.get("name") or "").strip() or "Game"
+            deck = suggest_deck_compatibility({}, {})
+            deck["note"] = (
+                "Manual title only — no store lookup. Defaults are generic; adjust flags as needed."
+            )
+            meta = {
+                "steam_appid": None,
+                "description": "",
+                "genres": "",
+                "developer": "",
+                "publisher": "",
+                "release_date": "",
+                "cover_path": "",
+                "protondb": {},
+                "deck_suggest": deck,
+                "store_source": "Manual",
+            }
+            self.ready.emit(meta, "")
+            return
+
         if steam_id is not None:
             details = steam_app_details(steam_id)
             cover = download_cover(steam_id, self.covers_dir)
