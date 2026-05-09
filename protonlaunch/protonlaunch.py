@@ -53,6 +53,7 @@ from protonlaunch.helpers.helpers import (
     build_launcher_script,
     write_steam_shortcut,
     resolve_steam_root,
+    resolve_prefix_layout,
     recommend_proton_key,
     winetricks_available,
     DEFAULT_WINETRICKS_VERBS,
@@ -389,15 +390,17 @@ class ProtonLaunch(QMainWindow):
         brand = QLabel("ProtonLaunch")
         brand.setObjectName("railTitle")
         rail_layout.addWidget(brand)
-        sub = QLabel("EXE → ProtonDB hints → Steam")
+        sub = QLabel("Simple guided install flow")
         sub.setObjectName("railSubtitle")
         sub.setWordWrap(True)
         rail_layout.addWidget(sub)
         rail_layout.addSpacing(28)
 
         steps = [
-            ("1", "Setup", "EXE, Steam & Proton"),
-            ("2", "Install", "Run & add to Steam"),
+            ("1", "Installer", "Pick setup .exe"),
+            ("2", "Match", "Find game metadata"),
+            ("3", "Runtime", "Proton and flags"),
+            ("4", "Install", "Run and add to Steam"),
         ]
         for i, (num, title, hint) in enumerate(steps):
             btn = QPushButton(f"{num}  {title}\n    {hint}")
@@ -435,6 +438,8 @@ class ProtonLaunch(QMainWindow):
         host_col.addWidget(self.stack, stretch=1)
 
         self._build_step_setup()
+        self._build_step_match()
+        self._build_step_runtime()
         self._build_step_install()
 
         # Bottom bar
@@ -474,15 +479,14 @@ class ProtonLaunch(QMainWindow):
         layout.setSpacing(16)
         layout.setContentsMargins(0, 0, 8, 0)
 
-        kicker = QLabel("Setup")
+        kicker = QLabel("Step 1")
         kicker.setObjectName("sectionKicker")
         layout.addWidget(kicker)
         title = QLabel("Pick your Windows installer")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         hint = QLabel(
-            "Choose the .exe first. We then match a Steam store page for artwork, "
-            "ProtonDB ratings, and Steam Deck–friendly defaults (always verify on ProtonDB)."
+            "Choose the installer .exe only. You will select the final installed game .exe later."
         )
         hint.setObjectName("sectionHint")
         hint.setWordWrap(True)
@@ -506,11 +510,23 @@ class ProtonLaunch(QMainWindow):
         browse_btn.clicked.connect(self._browse_exe)
         layout.addWidget(browse_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        layout.addSpacing(8)
-        steam_title = QLabel("Match game — Steam + GOG, Epic, etc. (via Lutris)")
-        steam_title.setObjectName("sectionTitle")
-        steam_title.setStyleSheet("font-size: 18px;")
-        layout.addWidget(steam_title)
+        layout.addStretch()
+        card, card_lay = self._make_page_frame()
+        card_lay.addWidget(_wrap_scroll(page_inner))
+        self.stack.addWidget(card)
+
+    def _build_step_match(self):
+        page_inner = QWidget()
+        layout = QVBoxLayout(page_inner)
+        layout.setSpacing(16)
+        layout.setContentsMargins(0, 0, 8, 0)
+
+        kicker = QLabel("Step 2")
+        kicker.setObjectName("sectionKicker")
+        layout.addWidget(kicker)
+        title = QLabel("Match game metadata")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
 
         search_row = QHBoxLayout()
         search_row.setSpacing(12)
@@ -582,10 +598,23 @@ class ProtonLaunch(QMainWindow):
         pdb_lay.addLayout(pdb_btn_row)
         layout.addWidget(pdb_frame)
 
-        compat_title = QLabel("Proton & compatibility")
-        compat_title.setObjectName("sectionTitle")
-        compat_title.setStyleSheet("font-size: 18px;")
-        layout.addWidget(compat_title)
+        layout.addStretch()
+        card, card_lay = self._make_page_frame()
+        card_lay.addWidget(_wrap_scroll(page_inner))
+        self.stack.addWidget(card)
+
+    def _build_step_runtime(self):
+        page_inner = QWidget()
+        layout = QVBoxLayout(page_inner)
+        layout.setSpacing(16)
+        layout.setContentsMargins(0, 0, 8, 0)
+
+        kicker = QLabel("Step 3")
+        kicker.setObjectName("sectionKicker")
+        layout.addWidget(kicker)
+        title = QLabel("Runtime and compatibility")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(20)
@@ -703,8 +732,14 @@ class ProtonLaunch(QMainWindow):
     def _next_step(self):
         current = self.stack.currentIndex()
         if current == 0:
-            if not self._validate_setup():
+            if not self.exe_path:
+                QMessageBox.warning(self, "Select an installer", "Browse to your Windows .exe first.")
                 return
+        if current == 1:
+            if not self.name_input.text().strip():
+                QMessageBox.warning(self, "Game name", "Enter a title or pick a store result.")
+                return
+        if current == 2:
             self._refresh_install_summary()
         if current < self.stack.count() - 1:
             self.stack.setCurrentIndex(current + 1)
@@ -737,6 +772,7 @@ class ProtonLaunch(QMainWindow):
             f"Installer: {Path(self.exe_path).name}",
             f"Title: {self.name_input.text().strip()}",
             f"Proton: {proton}",
+            "Launch target: choose installed game .exe after installer finishes",
             f"Flags: {', '.join(flags) if flags else 'none'}",
         ]
         if lo:
@@ -835,7 +871,21 @@ class ProtonLaunch(QMainWindow):
         self.apply_suggest_btn.setEnabled(False)
         self.metadata = {}
         if not results:
-            QListWidgetItem("No results found", self.results_list)
+            fallback_name = self.name_input.text().strip() or "Manual title"
+            li = QListWidgetItem(f"{fallback_name}  ·  Manual entry")
+            li.setData(
+                Qt.ItemDataRole.UserRole,
+                {
+                    "kind": "manual",
+                    "name": fallback_name,
+                    "display_suffix": "Manual",
+                },
+            )
+            self.results_list.addItem(li)
+            self.results_list.setCurrentRow(0)
+            self.protondb_tier_label.setText(
+                "No store results returned. Using manual mode; you can still continue install."
+            )
             return
         for item in results:
             name = item.get("name", "Unknown")
@@ -949,6 +999,7 @@ class ProtonLaunch(QMainWindow):
             **self.metadata,
             "name": name,
             "exe": self.exe_path,
+            "installer_exe": self.exe_path,
             "proton": proton_name,
             "proton_bin": self.proton_versions.get(proton_name, ""),
             "dxvk": self.dxvk_cb.isChecked(),
@@ -968,6 +1019,8 @@ class ProtonLaunch(QMainWindow):
         self._run_installer(game)
 
     def _run_installer(self, game):
+        self.install_btn.setEnabled(False)
+        self.install_btn.setText("Installer running…")
         self._progress = QProgressDialog(
             f"Running the installer for “{game['name']}”.\n\nComplete any dialogs that appear.",
             "Hide",
@@ -993,9 +1046,36 @@ class ProtonLaunch(QMainWindow):
         self.worker.done.connect(lambda ok, msg: self._on_install_done(ok, msg, game))
         self.worker.start()
 
+    def _pick_installed_exe(self, game) -> str | None:
+        prefix_root = PREFIXES_DIR / game["id"]
+        _compat, wine_pfx = resolve_prefix_layout(prefix_root)
+        start_dir = wine_pfx / "drive_c"
+        start = str(start_dir if start_dir.exists() else Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select installed game executable",
+            start,
+            "Windows Executables (*.exe);;All Files (*)",
+        )
+        picked = (path or "").strip()
+        if not picked:
+            return None
+        return picked
+
     def _on_install_done(self, ok, msg, game):
         self._progress.close()
+        self.install_btn.setEnabled(True)
+        self.install_btn.setText("Run Windows installer")
         if ok:
+            target_exe = self._pick_installed_exe(game)
+            if not target_exe:
+                QMessageBox.warning(
+                    self,
+                    "Executable needed",
+                    "Select the installed game .exe to create the launcher and Steam shortcut.",
+                )
+                return
+            game["exe"] = target_exe
             launcher_script = build_launcher_script(game, PREFIXES_DIR, DATA_DIR, STEAM_DIR)
             game["launcher_script"] = launcher_script
             self.last_game = game
@@ -1005,6 +1085,7 @@ class ProtonLaunch(QMainWindow):
                 self,
                 "Installation complete",
                 f"“{game['name']}” installer finished.\n\n"
+                f"Launch target:\n{game['exe']}\n\n"
                 f"Launcher script:\n{launcher_script}\n\n"
                 f"Use “Add to Steam library” when you are ready.",
             )
@@ -1016,6 +1097,15 @@ class ProtonLaunch(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.Yes:
+                target_exe = self._pick_installed_exe(game)
+                if not target_exe:
+                    QMessageBox.warning(
+                        self,
+                        "Executable needed",
+                        "No launcher created because no installed game .exe was selected.",
+                    )
+                    return
+                game["exe"] = target_exe
                 launcher_script = build_launcher_script(game, PREFIXES_DIR, DATA_DIR, STEAM_DIR)
                 game["launcher_script"] = launcher_script
                 self.last_game = game

@@ -58,13 +58,26 @@ def steam_shortcut_appid(name: str, exe: str) -> int:
 # These should be passed in or imported as needed
 
 def steam_search(query: str) -> list:
+    q = (query or "").strip()
+    if not q:
+        return []
     url = "https://store.steampowered.com/api/storesearch/?" + urllib.parse.urlencode(
-        {"term": query, "l": "english", "cc": "US"}
+        {"term": q, "l": "english", "cc": "US", "json": 1}
     )
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ProtonLaunch/1.0"})
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json,text/plain,*/*",
+            },
+        )
         with urllib.request.urlopen(req, timeout=8) as r:
-            return json.loads(r.read().decode()).get("items", [])
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+            return data.get("items", []) or []
     except Exception:
         return []
 
