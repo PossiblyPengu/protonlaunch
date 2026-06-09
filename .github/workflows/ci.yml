@@ -30,7 +30,11 @@ jobs:
       - name: Component tests
         env:
           PYTHONIOENCODING: utf-8
+          PROTONLAUNCH_SKIP_NETWORK: "1"
         run: python test_comprehensive.py
+
+      - name: Helper unit tests
+        run: python -m unittest test_helpers_unit.py -v
 
       - name: UI import tests
         run: python test_ui_imports.py

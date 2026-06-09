@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -170,14 +171,46 @@ def scan_prefix_for_game_exes(
     return [p for _mt, p in hits[:max_results]]
 
 
+_WINETRICKS_VERB_RE = re.compile(r"^[a-zA-Z0-9_+-]+$")
+
+
 def parse_winetricks_verbs_field(text: str, default: list[str] | None = None) -> list[str]:
     """Parse comma/semicolon-separated winetricks verbs; empty input uses default list."""
     base = list(default or DEFAULT_WINETRICKS_VERBS)
     t = (text or "").strip()
     if not t:
         return base
-    parts = [x.strip() for x in re.split(r"[,;]+", t) if x.strip()]
+    parts = [
+        x.strip()
+        for x in re.split(r"[,;]+", t)
+        if x.strip() and _WINETRICKS_VERB_RE.match(x.strip())
+    ]
     return parts if parts else base
+
+
+def parse_steam_launch_options_env(launch_options: str) -> dict[str, str]:
+    """Extract KEY=VALUE tokens from Steam launch options (e.g. DXVK_ASYNC=1)."""
+    env: dict[str, str] = {}
+    for token in re.split(r"\s+", (launch_options or "").strip()):
+        if not token or token == "%command%":
+            continue
+        if "=" not in token:
+            continue
+        key, _, value = token.partition("=")
+        key = key.strip()
+        if key and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            env[key] = value.strip()
+    return env
+
+
+def strip_env_from_launch_options(launch_options: str) -> str:
+    """Remove KEY=VALUE and %command% tokens; keep other Steam launch-option flags."""
+    kept: list[str] = []
+    for token in re.split(r"\s+", (launch_options or "").strip()):
+        if not token or token == "%command%" or "=" in token:
+            continue
+        kept.append(token)
+    return " ".join(kept)
 
 
 # ── Paths (imported from main if needed) ──
@@ -555,8 +588,14 @@ def proton_dist_bin_dir(proton_script: Path) -> Path | None:
 
 
 def is_system_wine_binary(proton_bin: str) -> bool:
+    """True for system Wine binaries, false for Proton wrapper scripts."""
+    name = Path(proton_bin).name.lower()
+    if name == "proton" or name.startswith("proton"):
+        return False
+    if name in ("wine", "wine64", "wine32"):
+        return True
     low = proton_bin.lower()
-    return "wine" in low and "proton" not in low and "proton" not in Path(proton_bin).parent.name.lower()
+    return "wine" in low and "/proton" not in low and "proton" not in Path(proton_bin).parent.name.lower()
 
 
 def winetricks_available() -> bool:
@@ -673,11 +712,25 @@ def build_launcher_script(game: dict, prefixes_dir: Path, data_dir: Path, steam_
     exe = game["exe"]
     is_wine = is_system_wine_binary(proton_bin)
     env_map = wine_proton_env(game, steam_dir, compat, wine_pfx)
-    env_lines = [f'export {k}="{v}"' for k, v in env_map.items()]
-    launch_cmd = f'"{proton_bin}" "{exe}"' if is_wine else f'"{proton_bin}" run "{exe}"'
+    env_map.update(parse_steam_launch_options_env(game.get("steam_launch_options", "")))
+    env_lines = [f"export {k}={shlex.quote(v)}" for k, v in env_map.items()]
+    if is_wine:
+        launch_cmd = f"{shlex.quote(proton_bin)} {shlex.quote(exe)}"
+    else:
+        launch_cmd = f"{shlex.quote(proton_bin)} run {shlex.quote(exe)}"
     script_path.write_text("#!/bin/bash\n" + "\n".join(env_lines) + f"\n\n{launch_cmd}\n")
     script_path.chmod(0o755)
     return str(script_path)
+
+
+def _shortcut_exists_vdf(sc: dict, appid: int) -> str | None:
+    """Return shortcut dict key if appid already exists."""
+    target = str(appid)
+    for key, entry in sc.items():
+        if isinstance(entry, dict) and str(entry.get("appid")) == target:
+            return str(key)
+    return None
+
 
 def _try_append_shortcut_vdf(
     shortcuts_file: Path,
@@ -717,12 +770,16 @@ def _try_append_shortcut_vdf(
         if sc is None or not isinstance(sc, dict):
             sc = {}
             data["shortcuts"] = sc
-        next_i = 0
-        for k in sc.keys():
-            ks = str(k)
-            if ks.isdigit():
-                next_i = max(next_i, int(ks) + 1)
-        sc[str(next_i)] = entry
+        existing_key = _shortcut_exists_vdf(sc, appid)
+        if existing_key is not None:
+            sc[existing_key] = entry
+        else:
+            next_i = 0
+            for k in sc.keys():
+                ks = str(k)
+                if ks.isdigit():
+                    next_i = max(next_i, int(ks) + 1)
+            sc[str(next_i)] = entry
         shortcuts_file.parent.mkdir(parents=True, exist_ok=True)
         buf = BytesIO()
         vdf.binary_dump(data, buf)
@@ -783,16 +840,29 @@ def write_steam_shortcut(
     userdata_dirs = enumerate_steam_userdata_config_dirs(steam_dir)
     if not userdata_dirs:
         return False, "No Steam userdata found. Is Steam installed and logged in?"
+    shortcut_launch_options = strip_env_from_launch_options(launch_options)
+    successes = 0
+    errors: list[str] = []
     for config_dir in userdata_dirs:
         shortcuts_file = config_dir / "shortcuts.vdf"
         try:
             if not _try_append_shortcut_vdf(
-                shortcuts_file, name, exe, icon, launch_options
+                shortcuts_file, name, exe, icon, shortcut_launch_options
             ):
                 _append_shortcut_binary_legacy(
-                    shortcuts_file, name, exe, icon, launch_options
+                    shortcuts_file, name, exe, icon, shortcut_launch_options
                 )
-            return True, "Added! Restart Steam to see it in your library."
+            successes += 1
         except Exception as e:
-            return False, str(e)
+            errors.append(str(e))
+    if successes:
+        if successes == 1:
+            msg = "Added! Restart Steam to see it in your library."
+        else:
+            msg = f"Added to {successes} Steam profiles. Restart Steam to see it in your library."
+        if errors:
+            msg += f" ({len(errors)} profile(s) could not be updated.)"
+        return True, msg
+    if errors:
+        return False, errors[0]
     return False, "No Steam config directories found."

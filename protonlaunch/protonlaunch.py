@@ -43,8 +43,8 @@ except ModuleNotFoundError as exc:
         print(
             "Missing dependency: PyQt6\n"
             "Install it and retry:\n"
-            "  Windows: py -3 -m pip install PyQt6 requests\n"
-            "  SteamOS: sudo pacman -S python-pyqt6 python-requests",
+            "  Windows: py -3 -m pip install PyQt6\n"
+            "  SteamOS: sudo pacman -S python-pyqt6",
             file=sys.stderr,
         )
         raise SystemExit(1)
@@ -415,6 +415,8 @@ class ProtonLaunch(QMainWindow):
         self.exe_path = ""
         self._search_worker = None
         self._details_worker = None
+        self._search_generation = 0
+        self._details_generation = 0
         self._step_nav_buttons = []
         self.drop_zone = None
         self._selected_steam_appid = None
@@ -747,7 +749,9 @@ class ProtonLaunch(QMainWindow):
         lo_label.setObjectName("metaLine")
         layout.addWidget(lo_label)
         self.launch_opts = QLineEdit()
-        self.launch_opts.setPlaceholderText("e.g. DXVK_ASYNC=1 %command% — only if you know you need them")
+        self.launch_opts.setPlaceholderText(
+            "e.g. DXVK_ASYNC=1 — KEY=VALUE pairs are written into the launcher script"
+        )
         self.launch_opts.textChanged.connect(self._refresh_install_summary)
         layout.addWidget(self.launch_opts)
 
@@ -923,8 +927,12 @@ class ProtonLaunch(QMainWindow):
         self.search_btn.setText("…")
         self.search_btn.setEnabled(False)
         self.results_list.clear()
+        self._search_generation += 1
+        generation = self._search_generation
         self._search_worker = SearchWorker(query)
-        self._search_worker.results_ready.connect(self._on_search_results)
+        self._search_worker.results_ready.connect(
+            lambda results, diag, g=generation: self._on_search_results(results, diag, g)
+        )
         self._search_worker.start()
 
     def _format_search_diag(self, diag: dict) -> str:
@@ -946,7 +954,9 @@ class ProtonLaunch(QMainWindow):
             lut_bit = f"Lutris: OK ({lc} hits)"
         return f"{steam_bit}  ·  {lut_bit}"
 
-    def _on_search_results(self, results, diag=None):
+    def _on_search_results(self, results, diag=None, generation=None):
+        if generation is not None and generation != self._search_generation:
+            return
         self.search_btn.setText("Search stores")
         self.search_btn.setEnabled(True)
         self.results_list.clear()
@@ -1006,11 +1016,17 @@ class ProtonLaunch(QMainWindow):
         self.protondb_note_label.setText("")
         self.apply_suggest_btn.setEnabled(False)
         self.open_pdb_btn.setEnabled(bool(self._selected_steam_appid))
+        self._details_generation += 1
+        generation = self._details_generation
         self._details_worker = DetailsWorker(pick, COVERS_DIR)
-        self._details_worker.ready.connect(self._on_details_ready)
+        self._details_worker.ready.connect(
+            lambda meta, cover_path, g=generation: self._on_details_ready(meta, cover_path, g)
+        )
         self._details_worker.start()
 
-    def _on_details_ready(self, meta, cover_path):
+    def _on_details_ready(self, meta, cover_path, generation=None):
+        if generation is not None and generation != self._details_generation:
+            return
         self.metadata = meta
         if cover_path and Path(cover_path).exists():
             pix = QPixmap(cover_path).scaled(
