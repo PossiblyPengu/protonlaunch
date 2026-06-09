@@ -16,7 +16,7 @@ A streamlined Windows game installer optimized for Steam Deck. Search, configure
 - Steam Deck (SteamOS) or Linux with 1280×800 or higher resolution
 - Proton installed via Steam **or** Proton-GE in `~/.steam/root/compatibilitytools.d/`
 - Python 3.10+
-- Dependencies: `pip install -r requirements.txt` (PyQt6, requests, vdf) — or on Steam Deck: `sudo pacman -S python-pyqt6 python-requests` and `pip install --user vdf` if you want safer Steam shortcut merging
+- Dependencies: `pip install -r requirements.txt` (PyQt6, vdf) — or on Steam Deck: `sudo pacman -S python-pyqt6` and `pip install --user vdf` for safer Steam shortcut merging
 
 ## Quick Start
 

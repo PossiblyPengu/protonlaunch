@@ -28,9 +28,9 @@ else
     if [ -f "$REQ" ]; then
         echo "Installing from requirements.txt…"
         /usr/bin/python3 -m pip install --user -r "$REQ"
-    elif ! /usr/bin/python3 -c "import PyQt6, requests, vdf" 2>/dev/null; then
-        echo "Installing user Python dependencies (PyQt6 + requests + vdf)…"
-        /usr/bin/python3 -m pip install --user PyQt6 requests vdf
+    elif ! /usr/bin/python3 -c "import PyQt6, vdf" 2>/dev/null; then
+        echo "Installing user Python dependencies (PyQt6 + vdf)…"
+        /usr/bin/python3 -m pip install --user PyQt6 vdf
     fi
 
     rm -rf "$INSTALL_DIR/protonlaunch"

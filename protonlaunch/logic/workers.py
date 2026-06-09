@@ -103,6 +103,22 @@ class DetailsWorker(QThread):
                     "deck_suggest": suggest_deck_compatibility(protondb, {}),
                     "store_source": store_label,
                 }
+            else:
+                meta = {
+                    "steam_appid": steam_id,
+                    "description": (
+                        "Steam store details and ProtonDB data were unavailable for this app id. "
+                        "You can still install — adjust runtime flags as needed."
+                    ),
+                    "genres": "",
+                    "developer": "",
+                    "publisher": "",
+                    "release_date": "",
+                    "cover_path": cover,
+                    "protondb": {},
+                    "deck_suggest": suggest_deck_compatibility({}, {}),
+                    "store_source": store_label,
+                }
             self.ready.emit(meta, cover)
             return
 
