@@ -25,17 +25,18 @@ echo "Verifying checksum…"
 mkdir -p "$BIN_DIR" "$DESKTOP_DIR"
 install -m 755 "$TMP/$ASSET" "$BIN_DIR/protonlaunch"
 
-cat > "$DESKTOP_DIR/protonlaunch.desktop" << EOF
+cat > "$DESKTOP_DIR/protonlaunch.desktop" << DESKTOP
 [Desktop Entry]
 Name=ProtonLaunch
-Comment=Install and launch Windows games and programs on Steam Deck
-Exec=$BIN_DIR/protonlaunch
+Comment=Install Windows programs and games on Steam Deck
+Exec=$BIN_DIR/protonlaunch %f
 Icon=applications-games
 Terminal=false
 Type=Application
-Categories=Game;
+Categories=Game;Utility;
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/vnd.microsoft.portable-executable;application/x-msi;application/x-ms-installer;
 StartupNotify=true
-EOF
+DESKTOP
 chmod +x "$DESKTOP_DIR/protonlaunch.desktop"
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 
@@ -43,5 +44,5 @@ echo ""
 echo "✓ ProtonLaunch installed to $BIN_DIR/protonlaunch"
 echo "  Find it in the app menu under Games, or run: $BIN_DIR/protonlaunch"
 echo ""
-echo "To use it from Game Mode, open ProtonLaunch and click \"⚙ Add Tool to Steam\","
-echo "then restart Steam."
+echo "Tip: in Desktop Mode you can right-click any setup .exe → Open With → ProtonLaunch."
+echo "To use it from Game Mode, open ProtonLaunch and tap \"Add ProtonLaunch to Steam\"."
