@@ -349,8 +349,35 @@ def scan_exes(drive_c: Path) -> list[Path]:
     return found
 
 
+def _same_file_contents(a: Path, b: Path) -> bool:
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                ca, cb = fa.read(1 << 20), fb.read(1 << 20)
+                if ca != cb:
+                    return False
+                if not ca:
+                    return True
+    except OSError:
+        return False
+
+
+def looks_like_installer(exe: Path, installer: Path | None = None) -> bool:
+    """Setup/uninstall/redist tools, or a copy of the installer the user picked."""
+    if _is_bad_exe(exe.name):
+        return True
+    if installer is not None:
+        return exe.name.lower() == installer.name.lower() or _same_file_contents(exe, installer)
+    return False
+
+
 def find_program(pfx: Path, name_hint: str = "", installer: Path | None = None) -> list[Candidate]:
-    """Rank the executables in a prefix by how likely each is 'the program'. Best first."""
+    """Rank the installed executables in a prefix by how likely each is 'the program'. Best first.
+
+    Copies of the installer itself are never returned: the goal is the finished product.
+    """
     drive_c = pfx / "drive_c"
     if not drive_c.is_dir():
         return []
@@ -396,6 +423,10 @@ def find_program(pfx: Path, name_hint: str = "", installer: Path | None = None) 
             if c.shortcut_name is None or bonus > 100:
                 c.shortcut_name = lnk.stem
             c.score += bonus
+
+    if installer is not None:
+        for key in [k for k, c in cands.items() if _same_file_contents(c.exe, installer)]:
+            del cands[key]
 
     for c in cands.values():
         if _is_bad_exe(c.exe.name):
@@ -912,9 +943,12 @@ def best_name(pending: PendingInstall, chosen: Candidate | None) -> str:
     return pending.name
 
 
-def is_confident(cands: list[Candidate]) -> bool:
-    """True when the top guess is good enough to use without asking (not an uninstaller etc.)."""
-    return bool(cands) and cands[0].score > -100
+def is_confident(cands: list[Candidate], installer: Path | None = None) -> bool:
+    """True when the top guess is safe to add to Steam without asking.
+
+    Never true for anything that looks like a setup/uninstall tool or the installer itself.
+    """
+    return bool(cands) and cands[0].score > -100 and not looks_like_installer(cands[0].exe, installer)
 
 
 def launch(app: App) -> subprocess.Popen:

@@ -233,7 +233,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.name_edit, 1)
         lay.addLayout(row)
         btns = QHBoxLayout()
-        self.portable_btn = button("It's the program itself (no install)", slot=self.use_portable)
+        self.portable_btn = button("No install needed — add this file itself", slot=self.use_portable)
         btns.addWidget(self.portable_btn)
         btns.addWidget(button("Browse…", slot=self.browse_picked))
         btns.addStretch(1)
@@ -357,7 +357,7 @@ class MainWindow(QMainWindow):
     def on_installed(self, pending: core.PendingInstall) -> None:
         self.pending = pending
         cands = pending.candidates
-        if core.is_confident(cands):
+        if core.is_confident(cands, pending.installer):
             self.finish(cands[0].exe, core.best_name(pending, cands[0]))
             return
         # Couldn't decide on our own: show the best guesses.
@@ -429,7 +429,7 @@ class MainWindow(QMainWindow):
                 msg += "\nRestart Steam to see it (Steam menu → Power → Restart Steam)."
         else:
             msg = "Couldn't find a Steam account to add it to — you can still play it from here."
-        self.done_text.setText(msg)
+        self.done_text.setText(f"{msg}\n\nSteam will launch: {Path(app.exe).name}")
         self.show_page(self.done)
 
     # ── library actions ──────────────────────────────────────────────────

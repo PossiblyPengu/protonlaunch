@@ -203,6 +203,32 @@ class TestInstallFlow(Env):
         self.assertEqual(pending.candidates[0].exe.name, "CoolGame.exe")
         self.assertTrue(core.is_confident(pending.candidates))
 
+    def test_installer_copy_is_never_the_program(self):
+        # Installer drops a byte-identical copy of itself plus a setup tool, and nothing else.
+        self.installer.write_bytes(b"MZ" + b"\x01" * 5_000_000)
+        os.environ["FAKE_NOTHING"] = "1"
+        job = self.job()
+        pending = job.run()
+        job.close()
+        c = pending.pfx / "drive_c/Program Files/Cool Game"
+        c.mkdir(parents=True, exist_ok=True)
+        (c / "cache.exe").write_bytes(self.installer.read_bytes())  # renamed copy
+        (c / "GameSetup.exe").write_bytes(b"MZ" + b"\x02" * 5_000_000)
+        cands = core.find_program(pending.pfx, pending.name, pending.installer)
+        self.assertNotIn("cache.exe", [x.exe.name for x in cands])
+        self.assertFalse(core.is_confident(cands, pending.installer))
+
+    def test_program_wins_over_installer_named_shortcut(self):
+        lnk = self.tmp / "x.lnk"
+        lnk.write_bytes(make_lnk(r"C:\Program Files\Cool Game\bin\CoolGame.exe"))
+        os.environ["FAKE_LNK"] = str(lnk)
+        job = self.job()
+        pending = job.run()
+        job.close()
+        self.assertTrue(core.is_confident(pending.candidates, pending.installer))
+        self.assertEqual(pending.candidates[0].exe.name, "CoolGame.exe")
+        self.assertNotEqual(pending.candidates[0].exe.name, self.installer.name)
+
     def test_portable_program(self):
         os.environ["FAKE_NOTHING"] = "1"
         job = self.job()
