@@ -11,6 +11,19 @@ A streamlined Windows game installer optimized for Steam Deck. Search, configure
 - **Isolated Prefixes** — Each game gets its own Wine prefix
 - **Steam Integration** — One-click add to Steam library with cover art
 
+## Easiest Install (Steam Deck)
+
+1. Switch to **Desktop Mode** (hold Power → Switch to Desktop)
+2. Open **Konsole** and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/main/get.sh | bash
+```
+
+3. Open **ProtonLaunch** from the app menu (Games), pick your Windows `.exe` installer, and follow the steps.
+
+No pip, pacman, or developer mode needed — it downloads the prebuilt binary and verifies its checksum.
+
 ## Requirements
 
 - Steam Deck (SteamOS) or Linux with 1280×800 or higher resolution
