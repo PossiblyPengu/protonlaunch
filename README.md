@@ -20,7 +20,7 @@ ProtonLaunch does these steps for you:
 2. Open **Konsole** and paste:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/claude/steam-deck-windows-install-mkeivr/get.sh | bash
 ```
 
 No pip, pacman, or developer mode needed. The script downloads the prebuilt binary and checks its checksum.
@@ -61,4 +61,4 @@ QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -t .
 The tests use a fake Proton, so they run anywhere, including CI. On minimal Linux images PyQt6 needs
 `libegl1 libgl1 libglib2.0-0 libxkbcommon0 libdbus-1-3`.
 
-Pushing a `v*` tag builds `protonlaunch-linux-x86_64` and publishes it to GitHub Releases, which is what `get.sh` downloads.
+`get.sh` downloads the prebuilt binary in `bin/`. Rebuild it with `./protonlaunch/build_onefile.sh` and copy `dist/protonlaunch` to `bin/protonlaunch-linux-x86_64` (update the `.sha256`). Pushing a `v*` tag also publishes it to GitHub Releases.

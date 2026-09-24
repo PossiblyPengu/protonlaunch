@@ -2,12 +2,13 @@
 # One-command ProtonLaunch installer for Steam Deck.
 # Downloads the latest prebuilt binary — no pip, pacman, or developer mode needed.
 #
-#   curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/main/get.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/claude/steam-deck-windows-install-mkeivr/get.sh | bash
 set -euo pipefail
 
 REPO="PossiblyPengu/protonlaunch"
+BRANCH="${PROTONLAUNCH_BRANCH:-claude/steam-deck-windows-install-mkeivr}"
 ASSET="protonlaunch-linux-x86_64"
-BASE_URL="https://github.com/$REPO/releases/latest/download"
+BASE_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/bin"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 TMP="$(mktemp -d)"
@@ -15,7 +16,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "=== ProtonLaunch Installer ==="
 
-echo "Downloading latest release…"
+echo "Downloading ProtonLaunch…"
 curl -fL --progress-bar -o "$TMP/$ASSET" "$BASE_URL/$ASSET"
 curl -fsSL -o "$TMP/$ASSET.sha256" "$BASE_URL/$ASSET.sha256"
 
@@ -41,7 +42,7 @@ chmod +x "$DESKTOP_DIR/protonlaunch.desktop"
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 
 echo ""
-echo "✓ ProtonLaunch installed to $BIN_DIR/protonlaunch"
+echo "✓ $("$BIN_DIR/protonlaunch" --version) installed to $BIN_DIR/protonlaunch"
 echo "  Find it in the app menu under Games, or run: $BIN_DIR/protonlaunch"
 echo ""
 echo "Tip: in Desktop Mode you can right-click any setup .exe → Open With → ProtonLaunch."
