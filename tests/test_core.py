@@ -390,6 +390,10 @@ class TestSteamShortcuts(Env):
         self.assertFalse(core.sync_steam_appid(app, entries))
         self.assertFalse(core.sync_steam_appid(app, []))
 
+    def test_game_mode_always_counts_as_steam_running(self):
+        os.environ["XDG_CURRENT_DESKTOP"] = "gamescope"
+        self.assertTrue(self._real_steam_is_running())
+
     def test_steam_is_running_sees_a_process_named_steam(self):
         import subprocess
         code = ("import ctypes, time\n"
@@ -775,6 +779,8 @@ class TestInstallFlow(Env):
         app = job.finish(pending, pending.candidates[0].exe)
         self.assertEqual(app.steam_added, "file")
         self.assertTrue(core.desktop_entry_path(app).exists())
+        log = (self.paths.logs / f"{app.id}.log").read_text()
+        self.assertIn("Steam was closed; its saved shortcut list went from 0 to 1 entries", log)
         core.uninstall(app, self.paths, roots=[self.steam])
         self.assertFalse(core.desktop_entry_path(app).exists())
 

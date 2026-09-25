@@ -1357,9 +1357,14 @@ class Installer:
         launcher = write_launcher(app, self.paths, self.steam_root, self._roots)
         app.launcher = str(launcher)
         write_desktop_entry(app)
-        add_to_steam(app, self._roots)
+        running = steam_is_running()
+        before = len(steam_shortcuts(self._roots))
+        add_to_steam(app, self._roots, running)
+        after = len(steam_shortcuts(self._roots))
         self.library.upsert(app)
         self._log(f"Installed '{app.name}' → {app.exe} (Steam: {app.steam_added or 'not added'})")
+        self._log(f"Steam was {'running' if running else 'closed'}; its saved shortcut list went from "
+                  f"{before} to {after} entries")
         self.close()
         return app
 
@@ -2011,6 +2016,8 @@ def _pe_icon(d) -> bytes | None:
 def steam_is_running() -> bool:
     """Is the Steam client running? Reads /proc directly (and asks pgrep too): guessing "no" while
     Steam runs would mean editing its shortcut list behind its back."""
+    if in_game_mode():
+        return True  # Game Mode is Steam
     uid = os.getuid()
     try:
         pids = [p for p in os.listdir("/proc") if p.isdigit()]

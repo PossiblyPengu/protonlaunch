@@ -1,5 +1,5 @@
 {
-  "version": "2.7.0",
-  "sha256": "8bedd7d01bad02751f70797e50e080f5ef9ad5114603a346d00741814f9371ea",
-  "notes": "Fixes duplicate Steam shortcuts: ProtonLaunch never edits Steam's shortcut list while Steam is running and never adds a program twice (\"Sent to Steam\" shows it's waiting on Steam). New: \u2630 Menu \u2192 Remove duplicate Steam shortcuts (with Steam closed) cleans up existing copies. Uninstalling while Steam runs tells you to remove the shortcut in Steam."
+  "version": "2.7.1",
+  "sha256": "170d7fafaf37cd627ecefedd4a31dadff69676c8bc6876e4d71293c6a2112f0a",
+  "notes": "Safety: in Game Mode ProtonLaunch always treats Steam as running, so it never edits Steam's shortcut list there. Install logs now record what happened to Steam's shortcut list. Includes 2.7.0's fix for duplicated Steam shortcuts and the new \u2630 Menu \u2192 Remove duplicate Steam shortcuts."
 }
