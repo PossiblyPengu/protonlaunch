@@ -4,6 +4,7 @@ It is deliberately not a launcher or library — once installed, programs live i
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -13,6 +14,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QRectF, QThread, QTimer, QUrl, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPixmap
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -1072,8 +1074,23 @@ class MainWindow(QMainWindow):
         self.go(self.pick)
 
     def use_portable(self) -> None:
-        if self.pending:
-            self.finish_install(core.adopt_portable(self.pending), self.pick.name.text())
+        if not self.pending:
+            return
+        pending = self.pending
+        whole = False
+        offer = core.portable_folder(pending)
+        if offer is not None:
+            folder, size = offer
+            choice = Sheet.ask(self, "Copy its folder too?",
+                               f"“{folder.name}” ({core.human_size(size)}) has other files next to "
+                               f"{pending.installer.name}. Portable programs usually need them.",
+                               ("Copy the folder", "Just the file", "Cancel"))
+            if choice not in (0, 1):
+                return
+            whole = choice == 0
+        # Copying can take a while: it happens in the background.
+        self.finish_install(lambda: core.adopt_portable(pending, whole), self.pick.name.text(),
+                            icon_from=pending.installer)
 
     def browse_program_for_pending(self) -> None:
         if not self.pending:
@@ -1092,11 +1109,13 @@ class MainWindow(QMainWindow):
             self.pending = None
         self.go_home()
 
-    def finish_install(self, exe: Path, name: str) -> None:
+    def finish_install(self, exe: Path | Callable[[], Path], name: str, icon_from: Path | None = None) -> None:
+        """Finish in the background. `exe` may be a function producing it (e.g. copying a portable
+        program into place first)."""
         pending, self.pending = self.pending, None
         if pending is None or self.job is None:
             return
-        icon_img = artwork.load_exe_icon(exe)
+        icon_img = artwork.load_exe_icon(icon_from or exe)
         icon_path = artwork.save_icon(icon_img, self.paths.icons / f"{pending.id}.png") if icon_img else ""
         job = self.job
         if self.stack.currentWidget() is not self.progress:
@@ -1105,7 +1124,8 @@ class MainWindow(QMainWindow):
 
         def run(status: Callable[[str], None]) -> core.App:
             job.status, job._log_cb = status, lambda _line: None
-            return job.finish(pending, exe, name, icon=icon_path)
+            program = exe() if callable(exe) else exe
+            return job.finish(pending, program, name, icon=icon_path)
 
         def finished(app: core.App) -> None:
             self.progress.stop()
@@ -1250,8 +1270,7 @@ class MainWindow(QMainWindow):
 
     def check_for_updates(self, manual: bool) -> None:
         if manual and updater.self_path() is None:
-            Sheet.ask(self, "Updates", "Updating from inside the app works for the downloaded ProtonLaunch. "
-                      "This copy runs from source — update it with git pull, or reinstall with get.sh.", ("Close",))
+            Sheet.ask(self, "Updates", updater.why_no_self_update(), ("Close",))
             return
         if self.update_check is not None:
             return
@@ -1348,6 +1367,15 @@ class MainWindow(QMainWindow):
         self.run_worker(lambda _s: core.add_shortcut("ProtonLaunch", str(exe), str(exe.parent)), finished,
                         lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)), kind="steam")
 
+    def open_files(self, files: list[str]) -> None:
+        """Another launch (e.g. Open With in Desktop Mode) handed us an installer."""
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if files and self.thread is None and Sheet.current is None:
+            self.confirm_install(Path(files[0]))
+
     # ── drag & drop, closing ─────────────────────────────────────────────
 
     def _dropped_installer(self, event) -> Path | None:
@@ -1406,14 +1434,67 @@ def main(argv: list[str] | None = None) -> int:
         return updater.cli_update(__version__)
     app = QApplication(argv[:1])
     app.setApplicationName("ProtonLaunch")
+    files = [str(Path(a).resolve()) for a in args if not a.startswith("-")]
+    if SingleInstance.hand_off(files):
+        print("ProtonLaunch is already open — passed it on.")
+        return 0
     app.setStyle("Fusion")
     app.setStyleSheet(theme.STYLE)
     win = MainWindow()
+    instance = SingleInstance()
+    instance.listen(win.open_files)
     if core.in_game_mode() or os.environ.get("PROTONLAUNCH_FULLSCREEN"):
         win.showFullScreen()
     else:
         win.show()
-    files = [a for a in args if not a.startswith("-")]
     if files:
         QTimer.singleShot(0, lambda: win.confirm_install(Path(files[0])))
     return app.exec()
+
+
+class SingleInstance:
+    """One ProtonLaunch at a time: a second launch hands its installer to the open window.
+
+    Two windows installing at once would race on the same records and prefixes."""
+
+    NAME = f"protonlaunch-{os.getuid()}"
+
+    def __init__(self) -> None:
+        self.server: QLocalServer | None = None
+        self.pending: dict[QLocalSocket, bytes] = {}
+
+    @classmethod
+    def hand_off(cls, files: list[str], name: str | None = None) -> bool:
+        sock = QLocalSocket()
+        sock.connectToServer(name or cls.NAME)
+        if not sock.waitForConnected(500):
+            return False
+        sock.write(json.dumps(files).encode())
+        sock.flush()
+        sock.waitForBytesWritten(1000)
+        sock.disconnectFromServer()
+        return True
+
+    def listen(self, on_files: Callable[[list[str]], None], name: str | None = None) -> None:
+        name = name or self.NAME
+        QLocalServer.removeServer(name)  # a stale socket from a crash
+        self.server = QLocalServer()
+        self.server.listen(name)
+
+        def accept() -> None:
+            while self.server.hasPendingConnections():
+                sock = self.server.nextPendingConnection()
+                self.pending[sock] = b""
+                sock.readyRead.connect(lambda s=sock: self.pending.__setitem__(s, self.pending[s] + bytes(s.readAll())))
+                sock.disconnected.connect(lambda s=sock: done(s))
+
+        def done(sock: QLocalSocket) -> None:
+            data = self.pending.pop(sock, b"") + bytes(sock.readAll())
+            sock.deleteLater()
+            try:
+                files = [str(f) for f in json.loads(data.decode() or "[]")]
+            except (ValueError, UnicodeDecodeError, TypeError):
+                files = []
+            on_files(files)
+
+        self.server.newConnection.connect(accept)

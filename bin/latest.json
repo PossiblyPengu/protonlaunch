@@ -1,5 +1,5 @@
 {
-  "version": "2.5.2",
-  "sha256": "c1e2d3e953d7eb44e4083ed3b05a8ccea3aefae2b138bd2e56a59196478c343b",
-  "notes": "Fixes: Add ProtonLaunch to Steam now sticks, no freeze when uninstalling big games, no crash when quitting mid-task, dialogs work in Game Mode, long paths no longer push buttons off-screen, updates right after a release no longer fail. Launches programs with their shortcut's arguments."
+  "version": "2.6.0",
+  "sha256": "f0428a999532772b6e53c4ddb26ad0ac30aeeb47bffe549af7934b3629bd189e",
+  "notes": "More fixes: the D:/Z: drive fix now survives Proton's own setup, waiting for installers and cancelling work inside the Steam Linux Runtime, the Deck stays awake while installing, portable programs can bring their folder, one ProtonLaunch at a time (Open With hands off to the open window), and each launch writes a log for troubleshooting."
 }

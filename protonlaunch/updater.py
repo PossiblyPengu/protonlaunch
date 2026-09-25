@@ -209,11 +209,18 @@ def restart(target: Path, args: list[str] | None = None) -> None:
     os.execve(str(target), [str(target), *(args or [])], restart_env())
 
 
+def why_no_self_update() -> str:
+    if not getattr(sys, "frozen", False):
+        return "This copy runs from source — update it with git pull, or reinstall with get.sh."
+    return (f"ProtonLaunch can't replace its own file in {Path(sys.executable).resolve().parent}. "
+            "Reinstall it with get.sh, which puts it in ~/.local/bin.")
+
+
 def cli_update(current: str, out=print) -> int:
     """`protonlaunch --update` from a terminal."""
     target = self_path()
     if target is None:
-        out("Self-update works for the downloaded app. From a source checkout, use git pull.")
+        out(why_no_self_update())
         return 1
     out(f"ProtonLaunch {current}: checking for updates…")
     errors: list[Exception] = []

@@ -380,6 +380,18 @@ class TestWindow(Env):
         self.assertIsNone(Sheet.current)
         self.assertTrue(self.win.centralWidget().isEnabled())
 
+    def test_second_launch_hands_installer_to_the_open_window(self):
+        from protonlaunch.app import SingleInstance
+        name = f"protonlaunch-test-{os.getpid()}"
+        got = []
+        inst = SingleInstance()
+        inst.listen(got.append, name=name)
+        self.assertTrue(SingleInstance.hand_off(["/home/deck/Downloads/setup.exe"], name=name))
+        self.wait_for(lambda: got)
+        self.assertEqual(got, [["/home/deck/Downloads/setup.exe"]])
+        inst.server.close()
+        self.assertFalse(SingleInstance.hand_off(["x"], name=f"{name}-nobody"))
+
     def test_double_click_picks_once(self):
         from PyQt6.QtTest import QTest
         sub = self.downloads / "Folder"

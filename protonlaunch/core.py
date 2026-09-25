@@ -5,6 +5,8 @@ Nothing in here imports Qt, so it can be tested headless and reused from the CLI
 from __future__ import annotations
 
 import collections
+import contextlib
+import fcntl
 import json
 import mmap
 import os
@@ -823,17 +825,30 @@ class Library:
 
     def save(self, apps: list[App]) -> None:
         self.paths.root.mkdir(parents=True, exist_ok=True)
-        tmp = self.paths.library_file.with_suffix(".tmp")
+        tmp = self.paths.library_file.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps([asdict(a) for a in apps], indent=2), encoding="utf-8")
         os.replace(tmp, self.paths.library_file)
 
+    @contextlib.contextmanager
+    def _locked(self):
+        """One writer at a time, even across two ProtonLaunch windows."""
+        self.paths.root.mkdir(parents=True, exist_ok=True)
+        with open(self.paths.root / "library.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
     def upsert(self, app: App) -> None:
-        apps = [a for a in self.load() if a.id != app.id]
-        apps.append(app)
-        self.save(apps)
+        with self._locked():
+            apps = [a for a in self.load() if a.id != app.id]
+            apps.append(app)
+            self.save(apps)
 
     def remove(self, app_id: str) -> None:
-        self.save([a for a in self.load() if a.id != app_id])
+        with self._locked():
+            self.save([a for a in self.load() if a.id != app_id])
 
     def unique_id(self, name: str) -> str:
         base = slugify(name)
@@ -873,27 +888,54 @@ def runtime_env(
     return env
 
 
-def run_command(rt: Runtime, target: str | Path, *extra: str, entry: Path | None = None) -> list[str]:
+def run_command(rt: Runtime, target: str | Path, *extra: str, entry: Path | None = None,
+                verb: str | None = None) -> list[str]:
     """Command line that runs a Windows .exe/.msi (unix or Windows path) under the runtime.
 
     With `entry` (a Steam Linux Runtime entry point) Proton runs inside the container, exactly
-    as Steam launches games.
+    as Steam launches games. `verb` is Proton's: "run", or "waitforexitandrun" (first wait until
+    everything already running in the prefix has exited).
     """
     target = str(target)
     args = ["msiexec", "/i", target] if target.lower().endswith(".msi") else [target, *extra]
     if not rt.is_proton:
         return [rt.path, *args]
     if entry is not None:
-        return [str(entry), "--verb=waitforexitandrun", "--", rt.path, "waitforexitandrun", *args]
-    return [rt.path, "run", *args]
+        verb = verb or "waitforexitandrun"
+        return [str(entry), f"--verb={verb}", "--", rt.path, verb, *args]
+    return [rt.path, verb or "run", *args]
+
+
+_INHIBIT: list[str] | None = None
+
+
+def sleep_inhibitor() -> list[str]:
+    """A systemd-inhibit prefix that keeps the Deck awake during a long install ([] if not allowed).
+
+    Checked once with a harmless command, so an install never fails because inhibiting did."""
+    global _INHIBIT
+    if _INHIBIT is None:
+        exe = shutil.which("systemd-inhibit")
+        cmd = [exe, "--what=sleep:idle", "--who=ProtonLaunch", "--why=Installing a Windows program",
+               "--mode=block"] if exe else []
+        if cmd:
+            try:
+                ok = subprocess.run([*cmd, "true"], env=clean_env(), timeout=5, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            cmd = cmd if ok else []
+        _INHIBIT = cmd
+    return list(_INHIBIT)
 
 
 # ── Drive letters ────────────────────────────────────────────────────────────
 #
 # Proton maps only C: (the prefix) and Z: (the whole filesystem, "/"). On SteamOS "/" is the
 # small read-only system partition ("rootfs"), so installers that look at Z: — or that default
-# to the drive they were started from — report "not enough space". While installing we hide Z:,
-# expose the home folder (where the free space is) as D:, and start the installer from there.
+# to the drive they were started from — report "not enough space". While installing we point Z:
+# at the home folder (where the free space is; Proton recreates a *missing* Z: every launch, so
+# it can't simply be removed), expose the home folder as D:, and start the installer from there.
 
 HOME_DRIVE = "d"
 INSTALLER_DRIVE = "e"  # only used when the installer lives outside the home folder
@@ -918,13 +960,14 @@ def to_windows_path(letter: str, root: Path, path: Path) -> str:
     return f"{letter.upper()}:\\" + "\\".join(rel.parts)
 
 
-def hide_system_drive(pfx: Path) -> str | None:
-    """Remove Z: for the duration of an install. Returns its old target for restore_system_drive."""
+def hide_system_drive(pfx: Path, replacement: Path) -> str | None:
+    """Point Z: at `replacement` for the duration of an install. Returns its old target."""
     z = _dosdevices(pfx) / "z:"
     if not z.is_symlink():
         return None
     target = os.readlink(z)
     z.unlink()
+    os.symlink(str(replacement), z)
     return target
 
 
@@ -932,8 +975,11 @@ def restore_system_drive(pfx: Path, target: str | None) -> None:
     if target is None:
         return
     z = _dosdevices(pfx) / "z:"
-    if not z.is_symlink() and not z.exists():
-        os.symlink(target, z)
+    if z.is_symlink() and os.readlink(z) == target:
+        return
+    if z.is_symlink() or z.exists():
+        z.unlink()
+    os.symlink(target, z)
 
 
 def free_space(path: Path) -> int:
@@ -973,8 +1019,11 @@ def write_launcher(
         "#!/bin/bash",
         "# ProtonLaunch launcher for " + " ".join(app.name.split()),
         f"export WINEPREFIX={q(str(compat / 'pfx'))}",
-        "# Z: is hidden while installing; put it back if an install was interrupted.",
-        '[ -e "$WINEPREFIX/dosdevices/z:" ] || ln -s / "$WINEPREFIX/dosdevices/z:" 2>/dev/null',
+        f"LOG={q(str(paths.logs / (app.id + '-launch.log')))}",
+        '{ mkdir -p "$(dirname "$LOG")" && exec >"$LOG" 2>&1; } || true  # last launch only, for troubleshooting',
+        'echo "ProtonLaunch: starting $(date)"',
+        "# Z: points at the home folder while installing; put it back if an install was interrupted.",
+        '[ "$(readlink "$WINEPREFIX/dosdevices/z:")" = / ] || ln -sfn / "$WINEPREFIX/dosdevices/z:"',
         f"cd {q(workdir)} || cd {q(str(Path(app.exe).parent))} || exit 1",
     ]
     if app.runtime_kind == "proton":
@@ -996,6 +1045,8 @@ def write_launcher(
             '"$HOME"/.local/share/Steam/compatibilitytools.d/*/proton '
             '"$HOME"/.local/share/Steam/steamapps/common/Proton*/proton 2>/dev/null | sort -V | tail -n 1)',
             "fi",
+            'if [ -z "$PROTON" ]; then echo "No Proton found. Install Proton Experimental from Steam."; exit 1; fi',
+            'echo "Proton: $PROTON"',
             'export STEAM_COMPAT_TOOL_PATHS="$(dirname "$PROTON")"',
             f"ENTRY={q(str(entry or ''))}",
             'if [ -n "$ENTRY" ] && [ -x "$ENTRY" ] && [ -z "$PROTONLAUNCH_NO_CONTAINER" ]; then',
@@ -1108,9 +1159,16 @@ class Installer:
 
     def _kill_wine(self) -> None:
         ws = self.runtime.wineserver() if self.runtime else None
-        if ws and self._env:
-            subprocess.run([ws, "-k"], env=self._env, timeout=30, check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmds = [[ws, "-k"]] if ws else []
+        if self.runtime is not None and self.runtime.is_proton and self.entry is not None:
+            # The container's Wine may not be reachable from outside: end its processes from inside.
+            cmds.append(run_command(self.runtime, "wineboot.exe", "-k", entry=self.entry, verb="run"))
+        for cmd in cmds if self._env else []:
+            try:
+                subprocess.run(cmd, env=self._env, timeout=60, check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         with self._lock:
             proc = self._proc
         if proc and proc.poll() is None:
@@ -1118,6 +1176,18 @@ class Installer:
                 os.killpg(proc.pid, signal.SIGTERM)
             except OSError:
                 pass
+
+    def _wait_for_wine(self, ws: str | None, inhibit: bool = False) -> None:
+        """Block until every Windows process in the prefix has exited (installers often hand off
+        to a second process and exit early)."""
+        pre = sleep_inhibitor() if inhibit else []
+        if self.runtime is not None and self.runtime.is_proton:
+            # Proton's waitforexitandrun waits for the prefix's Wine where it runs (inside the
+            # container, which the outside may not be able to see), then runs a no-op.
+            self._stream(pre + run_command(self.runtime, "cmd.exe", "/c", "exit", entry=self.entry,
+                                           verb="waitforexitandrun"))
+        if ws and not self._skip_wait:
+            self._stream([ws, "-w"])  # and the no-op's own short-lived Wine
 
     def cancel(self) -> None:
         """Abort: close every window of the installer and throw the prefix away."""
@@ -1176,8 +1246,7 @@ class Installer:
             # 1. Create the Windows environment first, so its drives can be adjusted.
             self._set("prepare", "Setting up Windows… (takes a minute the first time)")
             self._stream(run_command(self.runtime, "cmd.exe", "/c", "exit", entry=self.entry))
-            if ws:
-                self._stream([ws, "-w"])
+            self._wait_for_wine(ws)
             if self._cancelled:
                 raise Cancelled()
             if not (pfx / "system.reg").exists():
@@ -1193,22 +1262,22 @@ class Installer:
             except ValueError:
                 map_drive(pfx, INSTALLER_DRIVE, self.installer.parent)
                 target = to_windows_path(INSTALLER_DRIVE, self.installer.parent, self.installer)
-            hidden_z = hide_system_drive(pfx)
+            hidden_z = hide_system_drive(pfx, home)
             self._log(f"Drives: C: = {pfx / 'drive_c'} ({human_size(free_space(pfx))} free), "
-                      f"D: = {home} ({human_size(free_space(home))} free); Z: hidden")
+                      f"D: and Z: = {home} ({human_size(free_space(home))} free) while installing")
             home_before = snapshot_dirs(home)
 
             # 3. Run the installer.
             self._set("installer", "Running the installer — follow the steps on screen.\n"
                       f"Install to C: or D: (both have {human_size(free_space(home))} free).")
-            rc = self._stream(run_command(self.runtime, target, entry=self.entry))
+            rc = self._stream(sleep_inhibitor() + run_command(self.runtime, target, entry=self.entry))
             self._log(f"Installer exited with code {rc}")
             if self._cancelled:
                 raise Cancelled()
 
-            if ws and not self._skip_wait:
+            if not self._skip_wait:
                 self._set("wait", "Waiting for the installer's windows to close…")
-                self._stream([ws, "-w"])
+                self._wait_for_wine(ws, inhibit=True)
             if self._cancelled:
                 raise Cancelled()
             restore_system_drive(pfx, hidden_z)
@@ -1272,14 +1341,46 @@ class Installer:
         return app
 
 
-def adopt_portable(pending: PendingInstall) -> Path:
-    """For a program that needs no installing: copy it into the prefix and use it directly."""
+def _shared_folder(folder: Path) -> bool:
+    """A folder that holds unrelated things (Downloads, Desktop, a drive's root…), not one program."""
+    home = Path.home().resolve()
+    f = folder.resolve()
+    return (f in (home, Path("/")) or f in removable_media() or f.parent == Path("/run/media")
+            or (f.parent == home and f.name.lower() in _PROTECTED_HOME_DIRS | _GENERIC_FOLDERS))
+
+
+def portable_folder(pending: PendingInstall) -> tuple[Path, int] | None:
+    """The program's own folder with other files in it, if copying it along is worth offering.
+
+    Portable programs usually need the files next to them. Never offered for shared folders
+    (Downloads, Desktop, a drive's root…) or a folder that contains ProtonLaunch's own data."""
+    folder = pending.installer.parent
+    if _shared_folder(folder) or pending.compat_dir.resolve().is_relative_to(folder.resolve()):
+        return None
+    try:
+        if not any(p != pending.installer for p in folder.iterdir()):
+            return None
+    except OSError:
+        return None
+    return folder, dir_size(folder)
+
+
+def adopt_portable(pending: PendingInstall, whole_folder: bool = False) -> Path:
+    """For a program that needs no installing: copy it into the prefix and use it from there —
+    just the .exe, or (whole_folder, when portable_folder offers it) its folder with it."""
     folder = re.sub(r'[\\/:*?"<>|]+', " ", pending.name).strip() or "Program"
     dest_dir = pending.pfx / "drive_c/Program Files" / folder
+    src = pending.installer
+    offer = portable_folder(pending) if whole_folder else None
+    if offer is not None:
+        _src_dir, need = offer
+        if need > free_space(pending.pfx):
+            raise InstallError(f"Not enough free space to copy {src.parent.name} ({human_size(need)}).")
+        shutil.copytree(src.parent, dest_dir, symlinks=True, dirs_exist_ok=True)
+        return dest_dir / src.name
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / pending.installer.name
-    shutil.copy2(pending.installer, dest)
-    return dest
+    shutil.copy2(src, dest_dir / src.name)
+    return dest_dir / src.name
 
 
 def best_name(pending: PendingInstall, chosen: Candidate | None) -> str:

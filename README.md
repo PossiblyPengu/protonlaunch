@@ -20,7 +20,8 @@ Built for the Deck: full controller support (D-pad/stick to move, **A** select, 
 - **Adds it to Steam.** While Steam is running, ProtonLaunch asks Steam itself to add the program (the same hand-off SteamOS's own "Add to Steam" uses) and checks that it arrived — no restart needed. Editing Steam's shortcut file while Steam runs doesn't stick: Steam writes its own list back when it restarts. With Steam closed, the file is edited directly. The program's own icon is used, and library artwork is generated (capsule, wide, hero, logo) so it doesn't show up as a blank tile; artwork you added yourself (SteamGridDB, Decky…) is never overwritten.
 - **Adds it to the Desktop Mode app menu** (under Games), removed again on uninstall.
 - **Frees space afterwards:** one tap deletes the installer, including GOG-style `.bin` parts.
-- **Handles programs that need no install:** if the file *is* the program, it's added as-is.
+- **Handles programs that need no install:** if the file *is* the program, it's added as-is — with its folder, if you want (portable programs usually need the files next to them).
+- **Keeps the Deck awake while installing** (when the system allows it), so a long install isn't paused by sleep.
 
 ## Install (Steam Deck)
 
@@ -44,7 +45,7 @@ No pip, pacman, or developer mode needed. The script downloads the prebuilt bina
 | :--- | :--- |
 | Installed programs (one prefix each) | `~/.local/share/protonlaunch/prefixes/<name>/pfx/drive_c` |
 | Launch scripts used by Steam | `~/.local/share/protonlaunch/launchers/` |
-| Install logs | `~/.local/share/protonlaunch/logs/` |
+| Install logs, and each program's last launch (`<name>-launch.log`) | `~/.local/share/protonlaunch/logs/` |
 | Backup of your Steam shortcuts | `…/userdata/<id>/config/shortcuts.vdf.protonlaunch-bak` |
 
 **Uninstalling:** Home → **Installed programs** (or ☰ Menu → Installed programs). Each program shows its size and

@@ -86,6 +86,7 @@ class Tile(QPushButton):
         self.title, self.subtitle, self.icon, self.glyph = title, subtitle, icon, glyph
         self.color = color or artwork.accent_color(title, icon)
         self.setFixedSize(self.W, self.H)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)  # repaint on mouse hover, not just focus
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(title)
