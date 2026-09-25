@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import collections
 import json
+import mmap
 import os
 import re
 import shlex
@@ -50,6 +51,10 @@ class Paths:
     @property
     def logs(self) -> Path:
         return self.root / "logs"
+
+    @property
+    def icons(self) -> Path:
+        return self.root / "icons"
 
     @property
     def library_file(self) -> Path:
@@ -729,6 +734,9 @@ class App:
     launcher: str = ""
     steam_appid: int = 0
     installed_at: float = field(default_factory=time.time)
+    installer: str = ""  # the setup file it was installed from
+    icon: str = ""  # PNG extracted from the program's .exe
+    artwork: list[str] = field(default_factory=list)  # Steam library images we generated
 
     @property
     def runtime(self) -> Runtime:
@@ -1155,8 +1163,8 @@ class Installer:
             self._log_fh.close()
             self._log_fh = None
 
-    def finish(self, pending: PendingInstall, exe: Path, name: str | None = None) -> App:
-        """Save the app, write its launcher and add it to Steam."""
+    def finish(self, pending: PendingInstall, exe: Path, name: str | None = None, icon: str = "") -> App:
+        """Save the app, write its launcher and add it to Steam (with `icon`, a PNG path)."""
         self._set("steam", "Adding to Steam…")
         app = App(
             id=pending.id,
@@ -1166,11 +1174,13 @@ class Installer:
             runtime_name=pending.runtime.name,
             runtime_kind=pending.runtime.kind,
             runtime_path=pending.runtime.path,
+            installer=str(pending.installer),
+            icon=icon,
         )
         launcher = write_launcher(app, self.paths, self.steam_root, self._roots)
         app.launcher = str(launcher)
         app.steam_appid, users = add_steam_shortcut(
-            app.name, str(launcher), str(Path(app.exe).parent), roots=self._roots
+            app.name, str(launcher), str(Path(app.exe).parent), icon=icon, roots=self._roots
         )
         if not users:
             app.steam_appid = 0
@@ -1213,12 +1223,232 @@ def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None) -> No
     if app.steam_appid:
         remove_steam_shortcut(app.steam_appid, roots)
     shutil.rmtree(app.prefix, ignore_errors=True)
-    for f in (Path(app.launcher), paths.logs / f"{app.id}.log"):
+    files = [Path(app.launcher), paths.logs / f"{app.id}.log", *map(Path, app.artwork)]
+    if app.icon:
+        files.append(Path(app.icon))
+    for f in files:
         try:
             f.unlink()
         except OSError:
             pass
     Library(paths).remove(app.id)
+
+
+def steam_grid_dirs(roots: Iterable[Path] | None = None) -> list[Path]:
+    """Where Steam looks for custom library artwork, one per Steam user."""
+    return [cfg / "grid" for cfg in steam_user_config_dirs(roots)]
+
+
+def in_game_mode() -> bool:
+    env = os.environ
+    return (env.get("SteamGamepadUI") == "1" or env.get("XDG_CURRENT_DESKTOP", "").lower() == "gamescope"
+            or "GAMESCOPE_WAYLAND_DISPLAY" in env)
+
+
+def removable_media(mounts_text: str | None = None) -> list[Path]:
+    """Mounted SD cards and USB drives."""
+    if mounts_text is None:
+        try:
+            mounts_text = Path("/proc/mounts").read_text()
+        except OSError:
+            return []
+    out: list[Path] = []
+    for line in mounts_text.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        mp = re.sub(r"\\(\d{3})", lambda m: chr(int(m.group(1), 8)), parts[1])
+        if mp.startswith(("/run/media/", "/media/")) and Path(mp) not in out:
+            out.append(Path(mp))
+    return out
+
+
+# ── Finding installers the user downloaded ──────────────────────────────────
+
+
+@dataclass
+class FoundInstaller:
+    path: Path
+    size: int
+    mtime: float
+
+
+_NOT_INSTALLERS = ("unins", "vc_redist", "vcredist", "dxsetup", "dotnet", "crashhandler", "crashpad")
+_SKIP_SEARCH_DIRS = {"steamapps", "compatdata", "shadercache", "windows", "drive_c", "pfx", "node_modules"}
+
+
+def default_installer_dirs() -> list[Path]:
+    home = Path.home()
+    return [home / "Downloads", home / "Desktop", *removable_media()]
+
+
+def installer_files(installer: Path) -> list[Path]:
+    """The setup file plus its data parts (GOG-style 'setup_x-1.bin', 'setup_x-2.bin', …)."""
+    installer = Path(installer)
+    files = [installer] if installer.exists() else []
+    pat = re.compile(re.escape(installer.stem) + r"(-\d+)?\.bin", re.I)
+    try:
+        files += sorted(p for p in installer.parent.iterdir() if p != installer and pat.fullmatch(p.name))
+    except OSError:
+        pass
+    return files
+
+
+def files_size(files: Iterable[Path]) -> int:
+    total = 0
+    for f in files:
+        try:
+            total += f.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def delete_files(files: Iterable[Path]) -> int:
+    """Delete files; returns bytes freed."""
+    freed = 0
+    for f in files:
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            freed += size
+        except OSError:
+            pass
+    return freed
+
+
+def find_installers(
+    dirs: Iterable[Path] | None = None,
+    exclude: Iterable[str] = (),
+    depth: int = 2,
+    limit: int = 40,
+) -> list[FoundInstaller]:
+    """Windows installers in Downloads, Desktop and removable drives, newest first."""
+    skip = {str(Path(e)) for e in exclude}
+    found: dict[Path, FoundInstaller] = {}
+    for base in default_installer_dirs() if dirs is None else dirs:
+        base = Path(base)
+        if not base.is_dir():
+            continue
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(base):
+            seen += 1
+            if seen > 3000:
+                break
+            level = len(Path(dirpath).relative_to(base).parts)
+            dirnames[:] = [d for d in dirnames if not d.startswith(".") and d.lower() not in _SKIP_SEARCH_DIRS
+                           ] if level < depth else []
+            for f in filenames:
+                low = f.lower()
+                if not low.endswith(INSTALLER_SUFFIXES) or any(w in low for w in _NOT_INSTALLERS):
+                    continue
+                p = Path(dirpath) / f
+                if str(p) in skip or p in found:
+                    continue
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                found[p] = FoundInstaller(p, files_size(installer_files(p)), st.st_mtime)
+    return sorted(found.values(), key=lambda i: i.mtime, reverse=True)[:limit]
+
+
+# ── Icons inside Windows .exe files ─────────────────────────────────────────
+
+_RT_ICON, _RT_GROUP_ICON = 3, 14
+
+
+def exe_icon_data(exe: Path) -> bytes | None:
+    """The largest icon embedded in a Windows .exe, as PNG or .ico file bytes (Qt reads both)."""
+    try:
+        with open(exe, "rb") as f:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    except (OSError, ValueError):
+        return None
+    try:
+        return _pe_icon(mm)
+    except (struct.error, IndexError, ValueError, KeyError):
+        return None
+    finally:
+        mm.close()
+
+
+def _pe_icon(d) -> bytes | None:
+    if d[:2] != b"MZ":
+        return None
+    (pe,) = struct.unpack_from("<I", d, 0x3C)
+    if d[pe:pe + 4] != b"PE\0\0":
+        return None
+    coff = pe + 4
+    (nsec,) = struct.unpack_from("<H", d, coff + 2)
+    (optsize,) = struct.unpack_from("<H", d, coff + 16)
+    opt = coff + 20
+    (magic,) = struct.unpack_from("<H", d, opt)
+    if magic not in (0x10B, 0x20B):
+        return None
+    ddir = opt + (96 if magic == 0x10B else 112)
+    rsrc_rva, _rsrc_size = struct.unpack_from("<II", d, ddir + 2 * 8)
+    if not rsrc_rva:
+        return None
+    sections = []
+    for i in range(nsec):
+        vsize, va, rawsize, rawptr = struct.unpack_from("<IIII", d, opt + optsize + i * 40 + 8)
+        sections.append((va, max(vsize, rawsize), rawptr))
+
+    def off(rva: int) -> int:
+        for va, size, raw in sections:
+            if va <= rva < va + size:
+                return rva - va + raw
+        raise ValueError("RVA outside sections")
+
+    base = off(rsrc_rva)
+
+    def entries(dir_off: int) -> list[tuple[int, int]]:
+        named, ids = struct.unpack_from("<HH", d, base + dir_off + 12)
+        return [struct.unpack_from("<II", d, base + dir_off + 16 + i * 8) for i in range(min(named + ids, 4096))]
+
+    def leaf(target: int) -> bytes | None:
+        for _ in range(8):
+            if not target & 0x80000000:
+                break
+            sub = entries(target & 0x7FFFFFFF)
+            if not sub:
+                return None
+            target = sub[0][1]
+        rva, size = struct.unpack_from("<II", d, base + target)
+        o = off(rva)
+        return bytes(d[o:o + size])
+
+    icons: dict[int, int] = {}
+    groups: list[int] = []
+    for type_id, target in entries(0):
+        if not target & 0x80000000:
+            continue
+        if type_id == _RT_ICON:
+            icons.update((n, t) for n, t in entries(target & 0x7FFFFFFF) if not n & 0x80000000)
+        elif type_id == _RT_GROUP_ICON:
+            groups = [t for _n, t in entries(target & 0x7FFFFFFF)]
+    if not groups or not icons:
+        return None
+    grp = leaf(groups[0])
+    if not grp:
+        return None
+    (count,) = struct.unpack_from("<H", grp, 4)
+    best = None
+    for i in range(count):
+        w, h, colors, _res, planes, bits, _size, icon_id = struct.unpack_from("<BBBBHHIH", grp, 6 + i * 14)
+        key = (w or 256, bits)
+        if icon_id in icons and (best is None or key > best[0]):
+            best = (key, (w, h, colors, planes, bits, icon_id))
+    if best is None:
+        return None
+    w, h, colors, planes, bits, icon_id = best[1]
+    data = leaf(icons[icon_id])
+    if not data:
+        return None
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return data
+    return struct.pack("<HHHBBBBHHII", 0, 1, 1, w, h, colors, 0, planes, bits, len(data), 22) + data
 
 
 def steam_is_running() -> bool:

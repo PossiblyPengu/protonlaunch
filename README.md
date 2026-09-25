@@ -1,20 +1,25 @@
 # ⚡ ProtonLaunch
 
-**Install Windows programs and games on your Steam Deck. Pick the installer, and ProtonLaunch does the rest.**
+**Install Windows programs and games on your Steam Deck. Pick the installer; the program ends up in your Steam library.**
 
-1. Tap **Install a Windows program** and pick the setup `.exe` or `.msi`
-2. Click through the installer as usual
-3. That's it: the program shows up in ProtonLaunch and in your Steam library
+ProtonLaunch is an installer, not a launcher: once something is installed you play it from Steam like anything else.
 
-ProtonLaunch does these steps for you:
+1. Open ProtonLaunch. Setup files in Downloads, on the Desktop or on an SD card/USB drive are already on screen. Pick one, or **Browse files**.
+2. Click through the installer as usual.
+3. Done: the program is in your Steam library, with its icon and library artwork.
 
-- **Picks Proton:** GE-Proton if you have it, otherwise Proton Experimental or the newest Proton installed (including on the SD card). If you have no Proton at all, it offers a one-tap install through Steam.
-- **Makes a separate Windows setup (prefix)** for each program, so one program can't break another
-- **Finds the installed program** from the shortcuts its installer made, skipping uninstallers, redistributables and crash reporters. If it can't tell, it shows you its best guesses.
-- **Adds it to Steam** for every Steam account on the Deck, under the name from the program's shortcut
-- **Shows your internal storage as D: in the installer.** Proton only maps C: (the program's own Windows folder, which lives in your home folder) and Z: ("rootfs": SteamOS's small, read-only system partition). Installers that look at Z: complain there's no space. While installing, ProtonLaunch hides Z:, adds D: = `/home/deck` and starts the installer from there. Z: comes back afterwards so the program runs normally.
-- **Runs Proton the way Steam does**, inside the Steam Linux Runtime container, both for installers and when you play. Without it, installers that download files can fail with "no connection". If the runtime isn't installed yet, ProtonLaunch offers a one-tap install through Steam.
-- **Handles programs that need no install**: if the file *is* the program, one tap adds it as-is
+Built for the Deck: full controller support (D-pad/stick to move, **A** select, **B** back, **X** browse, **☰** menu), big touch targets, button hints along the bottom, and full screen in Game Mode.
+
+## What it does for you
+
+- **Picks Proton:** GE-Proton if you have it, otherwise Proton Experimental or the newest Proton installed (including on the SD card). If you have none, it offers a one-tap install through Steam.
+- **Runs Proton the way Steam does**, inside the Steam Linux Runtime, so installers that download files work. If the runtime isn't installed yet, it offers a one-tap install through Steam.
+- **Gives each program its own Windows setup (prefix)**, so one program can't break another.
+- **Shows your internal storage as D: in the installer.** Proton normally offers only C: and Z: ("rootfs", SteamOS's small read-only system partition), which makes installers complain about space. While installing, Z: is hidden and D: is your home folder. Z: comes back afterwards so the program runs normally.
+- **Finds the installed program** from the shortcuts its installer made, skipping uninstallers, redistributables and crash reporters. If it can't tell, it shows its best guesses with their icons.
+- **Adds it to Steam** for every Steam account on the Deck, using the program's own icon. It also generates library artwork (capsule, wide, hero and logo) so the program doesn't show up as a blank tile. Artwork you've added yourself (SteamGridDB, Decky…) is never overwritten.
+- **Frees space afterwards:** one tap deletes the installer, including GOG-style `.bin` parts.
+- **Handles programs that need no install:** if the file *is* the program, it's added as-is.
 
 ## Install (Steam Deck)
 
@@ -22,33 +27,31 @@ ProtonLaunch does these steps for you:
 2. Open **Konsole** and paste:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/claude/steam-deck-windows-install-mkeivr/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/main/get.sh | bash
 ```
 
 No pip, pacman, or developer mode needed. The script downloads the prebuilt binary and checks its checksum.
 
-**Shortcuts:**
-- In Desktop Mode, right-click any setup `.exe` → **Open With → ProtonLaunch**
-- To use ProtonLaunch in Game Mode, tap **Add ProtonLaunch to Steam** at the bottom of the app
-
-After installing something, restart Steam (Steam menu → Power → Restart Steam) so it shows up in your library.
+- To use ProtonLaunch in Game Mode: **☰ Menu → Add ProtonLaunch to Steam**.
+- In Desktop Mode you can also right-click any setup `.exe` → **Open With → ProtonLaunch**.
+- After installing something, restart Steam (STEAM button → Power → Restart Steam) to see it in your library.
 
 ## Where things go
 
 | What | Where |
 | :--- | :--- |
-| Programs (one prefix each) | `~/.local/share/protonlaunch/prefixes/<name>/pfx/drive_c` |
+| Installed programs (one prefix each) | `~/.local/share/protonlaunch/prefixes/<name>/pfx/drive_c` |
 | Launch scripts used by Steam | `~/.local/share/protonlaunch/launchers/` |
 | Install logs | `~/.local/share/protonlaunch/logs/` |
 | Backup of your Steam shortcuts | `…/userdata/<id>/config/shortcuts.vdf.protonlaunch-bak` |
 
-**Remove** in the app deletes the program's prefix, its launcher and its Steam shortcut.
+To uninstall a program, remove its shortcut in Steam and delete its folder under `~/.local/share/protonlaunch/prefixes/`.
 
 ## Command line
 
 ```bash
-protonlaunch                   # open the app
-protonlaunch ~/Downloads/setup.exe   # open and start installing right away
+protonlaunch                         # open the app
+protonlaunch ~/Downloads/setup.exe   # open and offer to install that file
 ```
 
 ## Develop
@@ -60,7 +63,8 @@ QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -t .
 ./protonlaunch/build_onefile.sh         # → dist/protonlaunch
 ```
 
-The tests use a fake Proton, so they run anywhere, including CI. On minimal Linux images PyQt6 needs
-`libegl1 libgl1 libglib2.0-0 libxkbcommon0 libdbus-1-3`.
+The tests use a fake Proton and fake Steam install, so they run anywhere, including CI. On minimal Linux images PyQt6 needs
+`libegl1 libgl1 libglib2.0-0 libxkbcommon0 libdbus-1-3`. `PROTONLAUNCH_NO_GAMEPAD=1` turns off controller input;
+`PROTONLAUNCH_FULLSCREEN=1` forces full screen outside Game Mode.
 
 `get.sh` downloads the prebuilt binary in `bin/`. Rebuild it with `./protonlaunch/build_onefile.sh` and copy `dist/protonlaunch` to `bin/protonlaunch-linux-x86_64` (update the `.sha256`). Pushing a `v*` tag also publishes it to GitHub Releases.

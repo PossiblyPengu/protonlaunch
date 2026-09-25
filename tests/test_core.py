@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -24,6 +25,59 @@ def make_lnk(target: str) -> bytes:
     size = hdr + len(volume) + len(base) + 1
     info = struct.pack("<7I", size, hdr, 1, hdr, hdr + len(volume), 0, size - 1) + volume + base + b"\x00"
     return bytes(header) + info
+
+
+def make_pe(icon: bytes, width: int = 48, bits: int = 32) -> bytes:
+    """A minimal PE32+ .exe whose only content is a resource section holding one icon."""
+    def rdir(entries):  # IMAGE_RESOURCE_DIRECTORY + entries
+        return struct.pack("<IIHHHH", 0, 0, 0, 0, 0, len(entries)) + b"".join(
+            struct.pack("<II", i, t) for i, t in entries)
+
+    group = struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHIH", width, width, 0, 0, 1, bits, len(icon), 1)
+    # layout (offsets inside .rsrc): root | icon type dir | icon lang dir | group type dir | group lang dir
+    #                                  | 2 data entries | icon data | group data
+    ityp_o, ilang_o, gtyp_o, glang_o = 32, 56, 80, 104  # root directory is at 0
+    ide_o, gde_o = 128, 144
+    icon_o = 160
+    group_o = icon_o + len(icon) + (-len(icon)) % 4
+    rva = 0x1000
+    rsrc = bytearray()
+    rsrc += rdir([(3, 0x80000000 | ityp_o), (14, 0x80000000 | gtyp_o)])
+    rsrc += rdir([(1, 0x80000000 | ilang_o)])
+    rsrc += rdir([(0x409, ide_o)])
+    rsrc += rdir([(1, 0x80000000 | glang_o)])
+    rsrc += rdir([(0x409, gde_o)])
+    rsrc += struct.pack("<IIII", rva + icon_o, len(icon), 0, 0)
+    rsrc += struct.pack("<IIII", rva + group_o, len(group), 0, 0)
+    assert len(rsrc) == icon_o
+    rsrc += icon + b"\0" * ((-len(icon)) % 4) + group
+    dos = bytearray(64)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 64)
+    coff = struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x22)
+    opt = bytearray(240)
+    struct.pack_into("<H", opt, 0, 0x20B)
+    struct.pack_into("<II", opt, 112 + 16, rva, len(rsrc))
+    sec = struct.pack("<8sIIIIIIHHI", b".rsrc", len(rsrc), rva, len(rsrc), 0x400, 0, 0, 0, 0, 0x40000040)
+    head = bytes(dos) + b"PE\0\0" + coff + bytes(opt) + sec
+    return head + b"\0" * (0x400 - len(head)) + bytes(rsrc)
+
+
+def bmp_icon(size: int = 16) -> bytes:
+    """An icon image the way most .exe files store it: a 32-bit DIB (height doubled for the mask)."""
+    header = struct.pack("<IiiHHIIiiII", 40, size, size * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+    pixels = bytes([40, 80, 220, 255]) * (size * size)  # BGRA: orange-ish blue
+    mask = b"\0" * (((size + 31) // 32) * 4 * size)
+    return header + pixels + mask
+
+
+def png_icon() -> bytes:
+    """A real 2x2 PNG, built by hand so no image library is needed."""
+    def chunk(t, data):
+        return struct.pack(">I", len(data)) + t + data + struct.pack(">I", zlib.crc32(t + data))
+    raw = b"".join(b"\0" + bytes([255, 0, 0, 255]) * 2 for _ in range(2))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 
 FAKE_PROTON = """#!/bin/bash
@@ -56,7 +110,8 @@ if [ -n "$FAKE_TO_D" ]; then  # user picked D:\\Games\\Cool Game in the installe
   touch "$pfx/dosdevices/d:/Games/Cool Game/unins000.exe"
   exit 0
 fi
-head -c 3000000 /dev/zero > "$c/Program Files/Cool Game/bin/CoolGame.exe"
+if [ -n "$FAKE_EXE_SRC" ]; then cp "$FAKE_EXE_SRC" "$c/Program Files/Cool Game/bin/CoolGame.exe"
+else head -c 3000000 /dev/zero > "$c/Program Files/Cool Game/bin/CoolGame.exe"; fi
 touch "$c/Program Files/Cool Game/unins000.exe" "$c/Program Files/Cool Game/bin/CrashReporter.exe"
 [ -n "$FAKE_LNK" ] && cp "$FAKE_LNK" "$c/users/steamuser/Desktop/Cool Game Deluxe.lnk"
 echo "installed $2"
@@ -148,6 +203,95 @@ class TestLnk(unittest.TestCase):
             exe.touch()
             self.assertEqual(core.windows_to_unix(pfx, r"c:\PROGRAM FILES\game\game.EXE"), exe)
             self.assertIsNone(core.windows_to_unix(pfx, r"C:\nope.exe"))
+
+
+class TestIcons(unittest.TestCase):
+    def test_png_icon_returned_as_is(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "a.exe"
+            exe.write_bytes(make_pe(png_icon(), width=0))
+            self.assertEqual(core.exe_icon_data(exe), png_icon())
+
+    def test_bmp_icon_wrapped_as_ico(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "a.exe"
+            icon = bmp_icon()
+            exe.write_bytes(make_pe(icon, width=16))
+            data = core.exe_icon_data(exe)
+            self.assertEqual(data[:6], struct.pack("<HHH", 0, 1, 1))
+            self.assertEqual(struct.unpack_from("<I", data, 6 + 12)[0], 22)  # image offset
+            self.assertEqual(data[22:], icon)
+
+    def test_not_an_exe(self):
+        with tempfile.TemporaryDirectory() as d:
+            for content in (b"", b"MZ" + b"\0" * 100, b"hello"):
+                f = Path(d) / "x.exe"
+                f.write_bytes(content)
+                self.assertIsNone(core.exe_icon_data(f))
+        self.assertIsNone(core.exe_icon_data(Path("/nonexistent.exe")))
+
+
+class TestFindingInstallers(unittest.TestCase):
+    def test_find_sort_and_parts(self):
+        with tempfile.TemporaryDirectory() as d:
+            dl = Path(d)
+            (dl / "Game [GOG]").mkdir()
+            gog = dl / "Game [GOG]" / "setup_game_1.0.exe"
+            gog.write_bytes(b"x" * 100)
+            (dl / "Game [GOG]" / "setup_game_1.0-1.bin").write_bytes(b"x" * 1000)
+            (dl / "Game [GOG]" / "unins000.exe").write_bytes(b"x")
+            old = dl / "tool.msi"
+            old.write_bytes(b"x" * 10)
+            os.utime(old, (1, 1))
+            (dl / "readme.txt").write_text("x")
+            (dl / ".hidden").mkdir()
+            (dl / ".hidden" / "secret.exe").write_bytes(b"x")
+            deep = dl / "a" / "b" / "c"
+            deep.mkdir(parents=True)
+            (deep / "too-deep.exe").write_bytes(b"x")
+            found = core.find_installers([dl])
+            self.assertEqual([f.path.name for f in found], ["setup_game_1.0.exe", "tool.msi"])
+            self.assertEqual(found[0].size, 1100)  # exe + its .bin part
+
+    def test_installer_files_and_delete(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "setup_x.exe"
+            exe.write_bytes(b"x" * 5)
+            for n in ("setup_x-1.bin", "setup_x-2.bin", "SETUP_X.BIN", "other-1.bin"):
+                (Path(d) / n).write_bytes(b"y" * 10)
+            files = core.installer_files(exe)
+            self.assertEqual(sorted(f.name for f in files),
+                             ["SETUP_X.BIN", "setup_x-1.bin", "setup_x-2.bin", "setup_x.exe"])
+            self.assertEqual(core.delete_files(files), 35)
+            self.assertEqual([p.name for p in Path(d).iterdir()], ["other-1.bin"])
+
+    def test_removable_media(self):
+        mounts = ("/dev/mmcblk0p1 /run/media/deck/SD\\040Card ext4 rw 0 0\n"
+                  "/dev/nvme0n1p8 /home ext4 rw 0 0\n"
+                  "/dev/sda1 /run/media/deck/USB vfat rw 0 0\n")
+        self.assertEqual(core.removable_media(mounts),
+                         [Path("/run/media/deck/SD Card"), Path("/run/media/deck/USB")])
+
+
+class TestGamepad(unittest.TestCase):
+    def test_nodes(self):
+        from protonlaunch import gamepad
+        text = ("I: Bus=0003\nN: Name=\"Microsoft X-Box 360 pad 0\"\nH: Handlers=event12 js0 \n\n"
+                "I: Bus=0011\nN: Name=\"AT keyboard\"\nH: Handlers=sysrq kbd event3\n")
+        self.assertEqual(gamepad.joystick_event_nodes(text), ["/dev/input/event12"])
+
+    def test_buttons_hat_and_stick(self):
+        from protonlaunch import gamepad as g
+        st = g.PadState()
+        self.assertEqual(st.feed(g.EV_KEY, 0x130, 1), [("a", True)])
+        self.assertEqual(st.feed(g.EV_KEY, 0x130, 2), [])  # autorepeat ignored
+        self.assertEqual(st.feed(g.EV_KEY, 0x130, 0), [("a", False)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_HAT0Y, -1), [("up", True)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_HAT0Y, 0), [("up", False)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 20000), [("right", True)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 12000), [])  # hysteresis keeps it held
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 2000), [("right", False)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, -30000), [("left", True)])
 
 
 class TestVdf(unittest.TestCase):

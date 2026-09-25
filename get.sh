@@ -2,13 +2,13 @@
 # One-command ProtonLaunch installer for Steam Deck.
 # Downloads the latest prebuilt binary — no pip, pacman, or developer mode needed.
 #
-#   curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/claude/steam-deck-windows-install-mkeivr/get.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/main/get.sh | bash
 set -euo pipefail
 
 REPO="PossiblyPengu/protonlaunch"
-BRANCH="${PROTONLAUNCH_BRANCH:-claude/steam-deck-windows-install-mkeivr}"
+# main once merged; the development branch until then. PROTONLAUNCH_BRANCH picks one explicitly.
+BRANCHES="${PROTONLAUNCH_BRANCH:-main claude/steam-deck-windows-install-mkeivr}"
 ASSET="protonlaunch-linux-x86_64"
-BASE_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/bin"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 TMP="$(mktemp -d)"
@@ -17,8 +17,14 @@ trap 'rm -rf "$TMP"' EXIT
 echo "=== ProtonLaunch Installer ==="
 
 echo "Downloading ProtonLaunch…"
-curl -fL --progress-bar -o "$TMP/$ASSET" "$BASE_URL/$ASSET"
-curl -fsSL -o "$TMP/$ASSET.sha256" "$BASE_URL/$ASSET.sha256"
+for BRANCH in $BRANCHES; do
+  BASE_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/bin"
+  if curl -fsSL -o "$TMP/$ASSET.sha256" "$BASE_URL/$ASSET.sha256" 2>/dev/null; then
+    curl -fL --progress-bar -o "$TMP/$ASSET" "$BASE_URL/$ASSET"
+    break
+  fi
+done
+[ -s "$TMP/$ASSET" ] || { echo "Couldn't download ProtonLaunch — check your internet connection."; exit 1; }
 
 echo "Verifying checksum…"
 (cd "$TMP" && sha256sum -c "$ASSET.sha256")

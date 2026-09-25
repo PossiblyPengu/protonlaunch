@@ -1,94 +1,72 @@
-"""ProtonLaunch window: pick an installer, everything else is automatic."""
+"""ProtonLaunch window: a Steam Deck–first installer. Pick a setup file; the program lands in Steam.
+
+It is deliberately not a launcher or library — once installed, programs live in Steam.
+"""
 from __future__ import annotations
 
+import os
 import shutil
 import sys
+import time
 from pathlib import Path
+from typing import Callable
 
-from PyQt6.QtCore import QThread, QTimer, QUrl, Qt, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QFont
+from PyQt6.QtCore import QRectF, QThread, QTimer, QUrl, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
-    QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
-    QPushButton,
     QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from . import __version__, core
+from . import __version__, artwork, core, theme
+from .nav import Nav
+from .widgets import HintBar, Sheet, Steps, Tile, Toast, button, draw_glyph, label
 
-STYLE = """
-QWidget { background: #171d25; color: #e6edf3; font-size: 18px; }
-QLabel#title { font-size: 34px; font-weight: 700; }
-QLabel#subtitle, QLabel#muted { color: #8b98a5; }
-QLabel#status { font-size: 22px; }
-QLabel#done { font-size: 30px; font-weight: 700; color: #59bf40; }
-QPushButton {
-  background: #2a3441; border: 2px solid #2a3441; border-radius: 12px;
-  padding: 12px 24px; min-height: 40px;
-}
-QPushButton:hover, QPushButton:focus { border-color: #1a9fff; }
-QPushButton:pressed { background: #1a9fff; }
-QPushButton#primary { background: #1a9fff; border-color: #1a9fff; font-size: 24px; font-weight: 700; }
-QPushButton#primary:hover, QPushButton#primary:focus { border-color: #ffffff; }
-QPushButton#danger { color: #ff6b6b; }
-QFrame#row { background: #1f2731; border-radius: 12px; }
-QFrame#row QLabel { background: transparent; }
-QListWidget, QPlainTextEdit, QLineEdit {
-  background: #10151b; border: 2px solid #2a3441; border-radius: 10px; padding: 6px;
-}
-QListWidget::item { padding: 14px; border-radius: 8px; }
-QListWidget::item:selected { background: #1a9fff; color: white; }
-QProgressBar { border: none; background: #2a3441; border-radius: 6px; height: 12px; }
-QProgressBar::chunk { background: #1a9fff; border-radius: 6px; }
-QScrollArea { border: none; }
-"""
+COLUMNS = 5
+MAX_FOUND = 2 * COLUMNS - 1  # two rows of tiles, the first being "Browse files"
 
 
-def label(text: str, obj: str = "", wrap: bool = True) -> QLabel:
-    lab = QLabel(text)
-    if obj:
-        lab.setObjectName(obj)
-    lab.setWordWrap(wrap)
-    return lab
+def ago(ts: float) -> str:
+    d = time.time() - ts
+    if d < 90:
+        return "just now"
+    if d < 3600:
+        return f"{int(d // 60)} min ago"
+    if d < 86400:
+        return f"{int(d // 3600)} h ago"
+    if d < 2 * 86400:
+        return "yesterday"
+    if d < 30 * 86400:
+        return f"{int(d // 86400)} days ago"
+    return time.strftime("%b %d, %Y", time.localtime(ts))
 
 
-def button(text: str, obj: str = "", slot=None) -> QPushButton:
-    b = QPushButton(text)
-    if obj:
-        b.setObjectName(obj)
-    b.setCursor(Qt.CursorShape.PointingHandCursor)
-    if slot:
-        b.clicked.connect(slot)
-    return b
+def glyph_icon(kind: str) -> QIcon:
+    pm = QPixmap(48, 48)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    draw_glyph(p, QRectF(8, 8, 32, 32), kind, QColor(theme.TEXT_DIM))
+    p.end()
+    return QIcon(pm)
 
 
-def pick_file(parent: QWidget, title: str, start: Path, filters: str) -> Path | None:
-    """Qt's own file dialog: works the same in Desktop Mode and Game Mode, with touch-sized text."""
-    dlg = QFileDialog(parent, title, str(start), filters)
-    dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-    dlg.setFileMode(QFileDialog.FileMode.ExistingFile)
-    places = [Path.home() / "Downloads", Path.home() / "Desktop", Path.home()]
-    media = Path("/run/media")
-    if media.is_dir():
-        places += [p for p in media.glob("*/*") if p.is_dir()] + [p for p in media.iterdir() if p.is_dir()]
-    dlg.setSidebarUrls([QUrl.fromLocalFile(str(p)) for p in places if p.is_dir()])
-    dlg.resize(1100, 700)
-    if dlg.exec() and dlg.selectedFiles():
-        return Path(dlg.selectedFiles()[0])
-    return None
+def pixmap(img: QImage, w: int, h: int) -> QPixmap:
+    return QPixmap.fromImage(img.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                                        Qt.TransformationMode.SmoothTransformation))
 
 
 class InstallThread(QThread):
@@ -112,46 +90,703 @@ class InstallThread(QThread):
             self.failed.emit(str(e))
 
 
-class AppRow(QFrame):
-    def __init__(self, app: core.App, window: "MainWindow"):
+# ── Pages ────────────────────────────────────────────────────────────────────
+
+
+class Page(QWidget):
+    title = ""
+
+    def __init__(self, win: "MainWindow"):
         super().__init__()
-        self.setObjectName("row")
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 12, 12, 12)
-        text = QVBoxLayout()
-        name = label(app.name)
-        name.setStyleSheet("font-size: 22px; font-weight: 600;")
-        text.addWidget(name)
-        text.addWidget(label(Path(app.exe).name, "muted"))
-        lay.addLayout(text, 1)
-        lay.addWidget(button("▶  Play", "primary", lambda: window.play(app)))
-        lay.addWidget(button("Change program", slot=lambda: window.change_exe(app)))
-        lay.addWidget(button("Remove", "danger", lambda: window.remove(app)))
+        self.win = win
+
+    def enter(self) -> None:
+        """Called every time the page is shown."""
+
+    def hints(self) -> list[tuple[str, str, Callable]]:
+        return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
+
+    def back(self) -> None:
+        self.win.go_home()
+
+    def x(self) -> None:
+        pass
+
+    def scroll_area(self) -> QScrollArea | None:
+        return self.findChild(QScrollArea)
+
+
+class HomePage(Page):
+    """Pick what to install: installers found on the Deck, or browse for one."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+        content = QWidget()
+        scroll.setWidget(content)
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(40, 26, 40, 26)
+        lay.setSpacing(12)
+        lay.addWidget(label("Install a Windows program", "h1"))
+        lay.addWidget(label("Pick a setup file. ProtonLaunch installs it and adds the program to your "
+                            "Steam library.", "dim"))
+        lay.addSpacing(10)
+        self.section = label("", "section")
+        lay.addWidget(self.section)
+        self.grid = QGridLayout()
+        self.grid.setHorizontalSpacing(16)
+        self.grid.setVerticalSpacing(16)
+        lay.addLayout(self.grid)
+        self.note = label("", "muted")
+        lay.addWidget(self.note)
+        lay.addStretch(1)
+        self.tiles: list[Tile] = []
+
+    def refresh(self) -> None:
+        while self.grid.count():
+            w = self.grid.takeAt(0).widget()
+            if w:  # hide + delete in place; setParent(None) would make it a stray top-level window
+                w.hide()
+                w.deleteLater()
+        installed = {a.installer for a in self.win.library.load() if a.installer}
+        found = core.find_installers(self.win.installer_dirs)
+        shown = found[:MAX_FOUND]
+
+        browse = Tile("Browse files", "Any folder or drive", glyph="folder")
+        browse.clicked.connect(lambda: self.win.browse_installers())
+        self.tiles = [browse]
+        for f in shown:
+            when = "Installed" if str(f.path) in installed else ago(f.mtime)
+            t = Tile(core.guess_name(f.path), f"{core.human_size(f.size)} · {when}", glyph="download")
+            t.setToolTip(str(f.path))
+            t.clicked.connect(lambda _c=False, f=f: self.win.confirm_install(f.path))
+            self.tiles.append(t)
+        for i, t in enumerate(self.tiles):
+            self.grid.addWidget(t, i // COLUMNS, i % COLUMNS, Qt.AlignmentFlag.AlignLeft)
+            t.show()  # layouts show new children lazily; focus needs them visible now
+        self.grid.setColumnStretch(COLUMNS, 1)
+
+        self.section.setText(f"FOUND ON THIS DECK  ·  {len(found)}" if found else "FOUND ON THIS DECK")
+        if not found:
+            self.note.setText("No setup files found in Downloads, on the Desktop or on an SD card or USB "
+                              "drive. Use Browse files to look anywhere else.")
+        elif len(found) > len(shown):
+            more = len(found) - len(shown)
+            self.note.setText(f"{more} more installer{'s' if more != 1 else ''} found — use Browse files.")
+        else:
+            self.note.setText("")
+        self.note.setVisible(bool(self.note.text()))
+
+    def enter(self) -> None:
+        self.refresh()
+        (self.tiles[1] if len(self.tiles) > 1 else self.tiles[0]).setFocus()
+
+    def hints(self):
+        return [("A", "Select", self.win.nav_activate), ("X", "Browse", self.x), ("☰", "Menu", self.win.open_menu)]
+
+    def back(self) -> None:
+        pass
+
+    def x(self) -> None:
+        self.win.browse_installers()
+
+
+class BrowserPage(Page):
+    """A controller-friendly file browser (the desktop file dialog is awkward with a gamepad)."""
+
+    title = "Browse"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setSpacing(12)
+        self.heading = label("Choose an installer", "h1")
+        lay.addWidget(self.heading)
+        self.where = label("", "muted", wrap=False)
+        lay.addWidget(self.where)
+        self.places = QHBoxLayout()
+        self.places.setSpacing(10)
+        lay.addLayout(self.places)
+        self.list = QListWidget()
+        self.list.setIconSize(self.list.iconSize() * 1.6)
+        self.list.itemActivated.connect(self._activate)
+        self.list.itemClicked.connect(self._activate)
+        lay.addWidget(self.list, 1)
+        self.cwd = Path.home()
+        self.roots: list[Path] = []
+        self.suffixes: tuple[str, ...] = core.INSTALLER_SUFFIXES
+        self.on_pick: Callable[[Path], None] = lambda p: None
+        self.on_back: Callable[[], None] = win.go_home
+        self.icon_dir, self.icon_file, self.icon_up = glyph_icon("folder"), glyph_icon("download"), glyph_icon("up")
+
+    def open(self, heading: str, places: list[tuple[str, Path]], suffixes: tuple[str, ...],
+             on_pick: Callable[[Path], None], on_back: Callable[[], None], start: Path | None = None) -> None:
+        self.heading.setText(heading)
+        self.suffixes, self.on_pick, self.on_back = suffixes, on_pick, on_back
+        places = [(n, p) for n, p in places if p.is_dir()]
+        self.roots = [p for _n, p in places]
+        while self.places.count():
+            it = self.places.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        for name, path in places:
+            self.places.addWidget(button(name, slot=lambda p=path: self.show_dir(p)))
+        self.places.addStretch(1)
+        self.show_dir(start if start and start.is_dir() else (self.roots[0] if self.roots else Path.home()))
+
+    def show_dir(self, path: Path) -> None:
+        self.cwd = path
+        self.where.setText(str(path))
+        self.list.clear()
+        if path not in self.roots and path.parent != path:
+            it = QListWidgetItem(self.icon_up, "Up one folder")
+            it.setData(Qt.ItemDataRole.UserRole, str(path.parent))
+            self.list.addItem(it)
+        try:
+            entries = sorted(path.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            entries = []
+        dirs = [e for e in entries if e.is_dir() and not e.name.startswith(".")]
+        files = [e for e in entries if e.is_file() and e.name.lower().endswith(self.suffixes)]
+        for d in dirs:
+            it = QListWidgetItem(self.icon_dir, d.name)
+            it.setData(Qt.ItemDataRole.UserRole, str(d))
+            self.list.addItem(it)
+        for f in files:
+            size = core.human_size(core.files_size(core.installer_files(f)))
+            it = QListWidgetItem(self.icon_file, f"{f.name}     {size}")
+            it.setData(Qt.ItemDataRole.UserRole, str(f))
+            self.list.addItem(it)
+        if not dirs and not files:
+            it = QListWidgetItem("Nothing to pick in this folder")
+            it.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.list.addItem(it)
+        # Start on the first real entry rather than "Up one folder".
+        has_up = path not in self.roots and path.parent != path
+        self.list.setCurrentRow(1 if has_up and (dirs or files) else 0)
+        self.list.setFocus()
+
+    def _activate(self, item: QListWidgetItem) -> None:
+        target = item.data(Qt.ItemDataRole.UserRole)
+        if not target:
+            return
+        p = Path(target)
+        if p.is_dir():
+            self.show_dir(p)
+        else:
+            self.on_pick(p)
+
+    def enter(self) -> None:
+        self.list.setFocus()
+
+    def hints(self):
+        return [("A", "Open", self.win.nav_activate), ("B", "Back", self.back)]
+
+    def back(self) -> None:
+        if self.cwd not in self.roots and self.cwd.parent != self.cwd:
+            self.show_dir(self.cwd.parent)
+        else:
+            self.on_back()
+
+
+class InstallPage(Page):
+    title = "Installing"
+    STEP_OF = {"prepare": 0, "installer": 1, "wait": 1, "scan": 2, "steam": 3}
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(48, 26, 48, 22)
+        lay.setSpacing(14)
+        self.heading = label("", "h1")
+        lay.addWidget(self.heading)
+        self.source = label("", "muted", wrap=False)
+        lay.addWidget(self.source)
+        lay.addSpacing(8)
+        self.steps = Steps()
+        lay.addWidget(self.steps)
+        lay.addStretch(1)
+        self.status = label("", "status")
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.status)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 0)
+        self.bar.setTextVisible(False)
+        lay.addWidget(self.bar)
+        self.elapsed = label("", "muted")
+        self.elapsed.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.elapsed)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumBlockCount(4000)
+        self.log.hide()
+        lay.addWidget(self.log, 4)
+        lay.addStretch(1)
+        row = QHBoxLayout()
+        self.details_btn = button("Show details", slot=self.toggle_log)
+        row.addWidget(self.details_btn)
+        row.addStretch(1)
+        self.continue_btn = button("Installer is done — continue", "primary", self.win_continue)
+        row.addWidget(self.continue_btn)
+        self.cancel_btn = button("Cancel install", "danger", self.back)
+        row.addWidget(self.cancel_btn)
+        lay.addLayout(row)
+        self.started = 0.0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+
+    def reset(self, installer: Path) -> None:
+        self.heading.setText(f"Installing {core.guess_name(installer)}")
+        self.source.setText(str(installer))
+        self.steps.set_step(0)
+        self.status.setText("Getting ready…")
+        self.log.clear()
+        self.continue_btn.hide()
+        self.cancel_btn.setEnabled(True)
+        self.started = time.monotonic()
+        self._tick()
+        self.timer.start(1000)
+
+    def _tick(self) -> None:
+        s = int(time.monotonic() - self.started)
+        self.elapsed.setText(f"{s // 60}:{s % 60:02d} elapsed")
+
+    def on_status(self, text: str, stage: str) -> None:
+        self.status.setText(text)
+        self.steps.set_step(self.STEP_OF.get(stage, self.steps.current))
+        self.continue_btn.setVisible(stage == "wait")
+        if stage == "wait":
+            self.continue_btn.setFocus()
+
+    def stop(self) -> None:
+        self.timer.stop()
+
+    def toggle_log(self) -> None:
+        show = not self.log.isVisible()
+        self.log.setVisible(show)
+        self.details_btn.setText("Hide details" if show else "Show details")
+
+    def win_continue(self) -> None:
+        self.continue_btn.hide()
+        self.win.continue_install()
+
+    def enter(self) -> None:
+        self.details_btn.setFocus()
+
+    def hints(self):
+        return [("A", "Select", self.win.nav_activate), ("B", "Cancel", self.back)]
+
+    def back(self) -> None:
+        self.win.cancel_install()
+
+
+class PickPage(Page):
+    title = "Choose the program"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(48, 26, 48, 22)
+        lay.setSpacing(14)
+        self.heading = label("Which one is the program?", "h1")
+        lay.addWidget(self.heading)
+        self.hint = label("", "dim")
+        lay.addWidget(self.hint)
+        self.list = QListWidget()
+        self.list.setIconSize(self.list.iconSize() * 2)
+        self.list.itemActivated.connect(lambda _i: self.use())
+        lay.addWidget(self.list, 10)
+        row = QHBoxLayout()
+        row.addWidget(label("Name in Steam", wrap=False))
+        self.name = QLineEdit()
+        row.addWidget(self.name, 1)
+        lay.addLayout(row)
+        lay.addStretch(1)
+        btns = QHBoxLayout()
+        self.portable = button("No install needed — add this file itself", slot=lambda: self.win.use_portable())
+        btns.addWidget(self.portable)
+        btns.addWidget(button("Browse…", slot=lambda: self.win.browse_program_for_pending()))
+        btns.addStretch(1)
+        btns.addWidget(button("Cancel", "danger", self.back))
+        self.use_btn = button("Add to Steam", "primary", self.use)
+        btns.addWidget(self.use_btn)
+        lay.addLayout(btns)
+
+    def load(self, pending: core.PendingInstall) -> None:
+        cands = pending.candidates
+        self.list.clear()
+        drive_c = pending.pfx / "drive_c"
+        for c in cands[:12]:
+            try:
+                where = str(c.exe.parent.relative_to(drive_c))
+            except ValueError:
+                where = str(c.exe.parent)
+            icon = artwork.load_exe_icon(c.exe)
+            it = QListWidgetItem(f"{c.exe.name}\n{where}")
+            if icon is not None:
+                it.setIcon(QIcon(QPixmap.fromImage(icon)))
+            it.setData(Qt.ItemDataRole.UserRole, str(c.exe))
+            self.list.addItem(it)
+        has = bool(cands)
+        self.heading.setText("Which one is the program?" if has else "Nothing was installed")
+        self.hint.setText("The installer finished. Pick the program to add to Steam." if has else
+                          "No new program files were found. If this file is the program itself (no setup "
+                          "needed), add it as it is. Otherwise the installer may have been closed early.")
+        self.list.setVisible(has)
+        self.use_btn.setVisible(has)
+        self.portable.setVisible(pending.installer.suffix.lower() == ".exe")
+        self.portable.setObjectName("" if has else "primary")
+        self.portable.style().polish(self.portable)
+        self.name.setText(pending.name)
+        if has:
+            self.list.setCurrentRow(0)
+
+    def enter(self) -> None:
+        (self.list if self.list.isVisible() else self.portable).setFocus()
+
+    def use(self) -> None:
+        item = self.list.currentItem()
+        if item is not None:
+            self.win.finish_install(Path(item.data(Qt.ItemDataRole.UserRole)), self.name.text())
+
+    def back(self) -> None:
+        self.win.discard_pending()
+
+
+class DonePage(Page):
+    title = "Installed"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(48, 30, 48, 26)
+        lay.setSpacing(14)
+        lay.addStretch(1)
+        self.art = QLabel()
+        self.art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.art)
+        self.heading = label("", "ok")
+        self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.heading)
+        self.text = label("", "dim")
+        self.text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.text)
+        lay.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.delete_btn = button("", slot=self.delete_installer)
+        row.addWidget(self.delete_btn)
+        self.done_btn = button("Done", "primary", self.back)
+        self.done_btn.setMinimumWidth(200)
+        row.addWidget(self.done_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.app: core.App | None = None
+
+    def load(self, app: core.App) -> None:
+        self.app = app
+        icon = artwork.load_icon(app.icon)
+        self.art.setPixmap(pixmap(artwork.render("", app.name, icon), 460, 215))
+        if app.steam_appid:
+            self.heading.setText(f"✓  {app.name} is in your Steam library")
+            msg = "Restart Steam to see it  (STEAM button → Power → Restart Steam)." \
+                if core.steam_is_running() else "It'll be there next time you open Steam."
+        else:
+            self.heading.setText(f"✓  {app.name} is installed")
+            msg = "No Steam account was found on this Deck, so it couldn't be added to Steam."
+        self.text.setText(f"{msg}\nSteam will launch: {Path(app.exe).name}")
+        self.refresh_delete()
+
+    def installer_files(self) -> list[Path]:
+        if not self.app or not self.app.installer:
+            return []
+        return [f for f in core.installer_files(Path(self.app.installer)) if f.exists()]
+
+    def refresh_delete(self) -> None:
+        files = self.installer_files()
+        self.delete_btn.setVisible(bool(files))
+        if files:
+            self.delete_btn.setText(f"Delete installer  ({core.human_size(core.files_size(files))})")
+
+    def delete_installer(self) -> None:
+        files = self.installer_files()
+        if not files or not self.app:
+            return
+        names = "\n".join(f"• {f.name}" for f in files[:6]) + ("\n…" if len(files) > 6 else "")
+        if Sheet.ask(self, "Delete the installer?", f"{self.app.name} stays installed. This deletes:\n{names}",
+                     ("Delete", "Keep"), primary=1, danger=(0,)) != 0:
+            return
+        freed = core.delete_files(files)
+        self.win.flash(f"Freed {core.human_size(freed)}")
+        self.win.refresh_space()
+        self.refresh_delete()
+        self.done_btn.setFocus()
+
+    def enter(self) -> None:
+        self.done_btn.setFocus()
+
+    def hints(self):
+        return [("A", "Select", self.win.nav_activate), ("B", "Done", self.back)]
+
+
+# ── Window ───────────────────────────────────────────────────────────────────
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, paths: core.Paths | None = None):
+    def __init__(self, paths: core.Paths | None = None, use_nav: bool = True):
         super().__init__()
+        self.setObjectName("main")
         self.paths = paths or core.Paths.default()
-        self.library = core.Library(self.paths)
+        self.library = core.Library(self.paths)  # bookkeeping only (ids, launch scripts, cleanup)
+        self.installer_dirs: list[Path] | None = None  # None = Downloads, Desktop, SD/USB
         self.thread: InstallThread | None = None
         self.job: core.Installer | None = None
-        self.current_installer: Path | None = None
         self.pending: core.PendingInstall | None = None
-        self.last_app: core.App | None = None
+        self.current_installer: Path | None = None
 
         self.setWindowTitle("ProtonLaunch")
         self.resize(1280, 800)
         self.setAcceptDrops(True)
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
+        v = QVBoxLayout(root)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(self._top_bar())
         self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
-        self._build_home()
-        self._build_progress()
-        self._build_pick()
-        self._build_done()
+        v.addWidget(self.stack, 1)
+        self.hint_bar = HintBar()
+        v.addWidget(self.hint_bar)
+        self.toast = Toast(root)
+
+        self.home = HomePage(self)
+        self.browser = BrowserPage(self)
+        self.progress = InstallPage(self)
+        self.pick = PickPage(self)
+        self.done = DonePage(self)
+        for p in (self.home, self.browser, self.progress, self.pick, self.done):
+            self.stack.addWidget(p)
+
+        self.nav = Nav(QApplication.instance(), self.on_action, busy=lambda: self.thread is not None) \
+            if use_nav else None
+        QApplication.instance().focusChanged.connect(lambda *_: self.update_hints())
         self.refresh_launchers()
-        self.refresh_library()
-        self.show_page(self.home)
+        self.go(self.home)
+
+    # chrome
+    def _top_bar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("topbar")
+        bar.setFixedHeight(64)
+        bar.setStyleSheet(f"QFrame#topbar {{ background: {theme.BG_RAISED}; border-bottom: 1px solid {theme.LINE}; }}")
+        h = QHBoxLayout(bar)
+        h.setContentsMargins(28, 0, 20, 0)
+        h.setSpacing(14)
+        h.addWidget(label("⚡ ProtonLaunch", "h2", wrap=False))
+        self.crumb = label("", "muted", wrap=False)
+        h.addWidget(self.crumb)
+        h.addStretch(1)
+        self.space = label("", "chip", wrap=False)
+        h.addWidget(self.space, 0, Qt.AlignmentFlag.AlignVCenter)
+        menu = button("☰", "flat", self.open_menu)
+        menu.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        menu.setToolTip("Menu")
+        h.addWidget(menu)
+        return bar
+
+    def update_hints(self) -> None:
+        page = self.stack.currentWidget()
+        if isinstance(page, Page):
+            note = "STEAM + X opens the keyboard" if core.in_game_mode() and \
+                isinstance(QApplication.focusWidget(), QLineEdit) else ""
+            self.hint_bar.set_hints(page.hints(), note)
+
+    def refresh_space(self) -> None:
+        self.space.setText(f"{core.human_size(core.free_space(self.paths.root))} free")
+
+    def go(self, page: Page) -> None:
+        self.stack.setCurrentWidget(page)
+        self.crumb.setText(f"›  {page.title}" if page.title else "")
+        self.refresh_space()
+        page.enter()
+        self.update_hints()
+
+    def go_home(self) -> None:
+        self.go(self.home)
+
+    def nav_activate(self) -> None:
+        if self.nav:
+            self.nav.activate()
+
+    def on_action(self, action: str) -> None:
+        modal = QApplication.activeModalWidget()
+        if isinstance(modal, Sheet):
+            if action == "b":
+                modal.reject()
+            return
+        page = self.stack.currentWidget()
+        if not isinstance(page, Page):
+            return
+        if action == "b":
+            page.back()
+        elif action == "x":
+            page.x()
+        elif action in ("start", "select"):
+            self.open_menu()
+        elif action in ("lb", "rb"):
+            area = page.scroll_area()
+            if area:
+                sb = area.verticalScrollBar()
+                sb.setValue(sb.value() + (-1 if action == "lb" else 1) * area.viewport().height() * 3 // 4)
+
+    def flash(self, text: str) -> None:
+        self.toast.show_message(text)
+
+    # ── install flow ─────────────────────────────────────────────────────
+
+    def browse_installers(self) -> None:
+        home = Path.home()
+        places = [("Downloads", home / "Downloads"), ("Desktop", home / "Desktop"), ("Home", home)]
+        places += [(p.name, p) for p in core.removable_media()]
+        self.browser.open("Choose an installer", places, core.INSTALLER_SUFFIXES, self.confirm_install,
+                          self.go_home)
+        self.go(self.browser)
+
+    def confirm_install(self, installer: Path) -> None:
+        name = core.guess_name(installer)
+        size = core.human_size(core.files_size(core.installer_files(installer)))
+        free = core.human_size(core.free_space(self.paths.root))
+        choice = Sheet.ask(self, f"Install {name}?",
+                           f"{installer}\n\nInstaller: {size}   ·   Free space: {free}\n\n"
+                           "The installer opens next — click through it as usual. ProtonLaunch then finds the "
+                           "program and adds it to Steam.", ("Install", "Cancel"))
+        if choice == 0:
+            self.start_install(installer)
+
+    def start_install(self, installer: Path, allow_no_container: bool = False) -> None:
+        if self.thread is not None:
+            return
+        installer = Path(installer)
+        self.current_installer = installer
+        self.progress.reset(installer)
+        self.go(self.progress)
+        t = InstallThread(installer, self.paths, allow_no_container)
+        t.status.connect(lambda text: self.progress.on_status(text, t.job.stage))
+        t.log.connect(self.progress.log.appendPlainText)
+        t.done.connect(self.on_installed)
+        t.failed.connect(self.on_failed)
+        t.cancelled.connect(self.on_cancelled)
+        t.finished.connect(self._thread_finished)
+        self.thread, self.job = t, t.job
+        t.start()
+
+    def _thread_finished(self) -> None:
+        if self.job:
+            # The thread's signals die with it; route later updates straight to the UI.
+            job = self.job
+            job.status = lambda text: self.progress.on_status(text, job.stage)
+            job._log_cb = self.progress.log.appendPlainText
+        if self.thread:
+            self.thread.deleteLater()
+        self.thread = None
+
+    def continue_install(self) -> None:
+        if self.thread:
+            self.thread.job.continue_now()
+
+    def cancel_install(self) -> None:
+        if not self.thread:
+            return
+        if Sheet.ask(self, "Cancel the install?", "The installer is closed and everything it installed so far "
+                     "is removed.", ("Keep installing", "Cancel install"), danger=(1,)) == 1 and self.thread:
+            self.progress.cancel_btn.setEnabled(False)
+            self.progress.status.setText("Cancelling…")
+            self.thread.job.cancel()
+
+    def on_cancelled(self) -> None:
+        self.progress.stop()
+        self.go_home()
+        self.flash("Install cancelled")
+
+    def on_failed(self, message: str) -> None:
+        self.progress.stop()
+        self.go_home()
+        if message == "NO_RUNTIME":
+            if Sheet.ask(self, "Proton is needed", "ProtonLaunch uses Proton to run Windows installers. Steam "
+                         "can download it for you — try again when it's done.", ("Install Proton", "Close")) == 0:
+                QDesktopServices.openUrl(QUrl(f"steam://install/{core.PROTON_EXPERIMENTAL_APPID}"))
+            return
+        if message.startswith("NO_CONTAINER:"):
+            appid = message.split(":", 1)[1]
+            choice = Sheet.ask(self, "One more Steam download needed",
+                               "Proton runs inside the Steam Linux Runtime, which isn't installed yet. Without "
+                               "it, installers often can't download anything.\n\nSteam can install it (a few "
+                               "hundred MB). Run the install again when it's done.",
+                               ("Install it", "Continue without it", "Cancel"))
+            if choice == 0:
+                QDesktopServices.openUrl(QUrl(f"steam://install/{appid}"))
+            elif choice == 1 and self.current_installer:
+                self.start_install(self.current_installer, allow_no_container=True)
+            return
+        head, _, rest = message.partition("\n\n")
+        Sheet.ask(self, "Install failed", head, ("Close",), detail=rest)
+
+    def on_installed(self, pending: core.PendingInstall) -> None:
+        self.pending = pending
+        cands = pending.candidates
+        if core.is_confident(cands, pending.installer):
+            self.finish_install(cands[0].exe, core.best_name(pending, cands[0]))
+            return
+        self.progress.stop()
+        self.pick.load(pending)
+        self.go(self.pick)
+
+    def use_portable(self) -> None:
+        if self.pending:
+            self.finish_install(core.adopt_portable(self.pending), self.pick.name.text())
+
+    def browse_program_for_pending(self) -> None:
+        if not self.pending:
+            return
+        drive_c = self.pending.pfx / "drive_c"
+        places = [("C: drive", drive_c), ("Home", Path.home())]
+        self.browser.open("Choose the program", places, (".exe",),
+                          lambda p: self.finish_install(p, self.pick.name.text()), lambda: self.go(self.pick))
+        self.go(self.browser)
+
+    def discard_pending(self) -> None:
+        if self.pending:
+            if self.job:
+                self.job.close()
+            shutil.rmtree(self.pending.compat_dir, ignore_errors=True)
+            self.pending = None
+        self.go_home()
+
+    def finish_install(self, exe: Path, name: str) -> None:
+        pending, self.pending = self.pending, None
+        if pending is None or self.job is None:
+            return
+        self.progress.stop()
+        icon_img = artwork.load_exe_icon(exe)
+        icon_path = artwork.save_icon(icon_img, self.paths.icons / f"{pending.id}.png") if icon_img else ""
+        try:
+            app = self.job.finish(pending, exe, name, icon=icon_path)
+        except Exception as e:  # noqa: BLE001
+            Sheet.ask(self, "Couldn't finish", str(e), ("Close",))
+            self.go_home()
+            return
+        app.artwork = artwork.write_steam_artwork(app.steam_appid, app.name, icon_img, core.steam_grid_dirs())
+        self.library.upsert(app)
+        self.done.load(app)
+        self.go(self.done)
 
     def refresh_launchers(self) -> None:
         """Rewrite launch scripts so programs installed by older versions get current fixes."""
@@ -163,349 +798,37 @@ class MainWindow(QMainWindow):
                 except OSError:
                     pass
 
-    # ── pages ────────────────────────────────────────────────────────────
+    # ── menu ─────────────────────────────────────────────────────────────
 
-    def _page(self) -> tuple[QWidget, QVBoxLayout]:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(48, 36, 48, 36)
-        lay.setSpacing(16)
-        self.stack.addWidget(w)
-        return w, lay
-
-    def _build_home(self) -> None:
-        self.home, lay = self._page()
-        lay.addWidget(label("ProtonLaunch", "title"))
-        lay.addWidget(label("Install Windows programs and games on your Steam Deck.", "subtitle"))
-        self.install_btn = button("+  Install a Windows program", "primary", self.choose_installer)
-        self.install_btn.setMinimumHeight(96)
-        lay.addWidget(self.install_btn)
-        lay.addWidget(label("Pick the setup .exe or .msi. ProtonLaunch installs it and adds it to Steam.", "muted"))
-        lay.addSpacing(12)
-        self.library_title = label("Installed", "subtitle")
-        self.library_title.setStyleSheet("font-size: 22px; font-weight: 600;")
-        lay.addWidget(self.library_title)
-        self.rows = QVBoxLayout()
-        self.rows.setSpacing(10)
-        holder = QWidget()
-        outer = QVBoxLayout(holder)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addLayout(self.rows)
-        outer.addStretch(1)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(holder)
-        lay.addWidget(scroll, 1)
-        foot = QHBoxLayout()
-        self.space_label = label("", "muted", wrap=False)
-        foot.addWidget(self.space_label)
-        foot.addStretch(1)
-        foot.addWidget(button("Add ProtonLaunch to Steam", slot=self.add_self_to_steam))
-        lay.addLayout(foot)
-
-    def _build_progress(self) -> None:
-        self.progress, lay = self._page()
-        self.progress_title = label("", "title")
-        lay.addWidget(self.progress_title)
-        lay.addStretch(1)
-        self.status = label("", "status", wrap=False)
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self.status)
-        bar = QProgressBar()
-        bar.setRange(0, 0)
-        bar.setTextVisible(False)
-        lay.addWidget(bar)
-        self.log_view = QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(3000)
-        self.log_view.setFont(QFont("monospace", 11))
-        self.log_view.hide()
-        lay.addWidget(self.log_view, 3)
-        lay.addStretch(1)
-        btns = QHBoxLayout()
-        self.details_btn = button("Show details", slot=self.toggle_log)
-        btns.addWidget(self.details_btn)
-        btns.addStretch(1)
-        self.continue_btn = button("Installer is done — continue", "primary", self.continue_now)
-        btns.addWidget(self.continue_btn)
-        self.cancel_btn = button("Cancel", "danger", self.cancel_install)
-        btns.addWidget(self.cancel_btn)
-        lay.addLayout(btns)
-
-    def _build_pick(self) -> None:
-        self.pick, lay = self._page()
-        self.pick_title = label("Which one is the program?", "title")
-        lay.addWidget(self.pick_title)
-        self.pick_hint = label("", "subtitle")
-        lay.addWidget(self.pick_hint)
-        self.pick_list = QListWidget()
-        self.pick_list.itemDoubleClicked.connect(lambda _i: self.use_picked())
-        lay.addWidget(self.pick_list, 10)
-        row = QHBoxLayout()
-        row.addWidget(label("Name in Steam:", wrap=False))
-        self.name_edit = QLineEdit()
-        row.addWidget(self.name_edit, 1)
-        lay.addLayout(row)
-        btns = QHBoxLayout()
-        self.portable_btn = button("No install needed — add this file itself", slot=self.use_portable)
-        btns.addWidget(self.portable_btn)
-        btns.addWidget(button("Browse…", slot=self.browse_picked))
-        btns.addStretch(1)
-        btns.addWidget(button("Cancel", "danger", self.discard_pending))
-        lay.addStretch(1)
-        self.use_btn = button("Use this", "primary", self.use_picked)
-        btns.addWidget(self.use_btn)
-        lay.addLayout(btns)
-
-    def _build_done(self) -> None:
-        self.done, lay = self._page()
-        lay.addStretch(1)
-        self.done_title = label("", "done")
-        self.done_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self.done_title)
-        self.done_text = label("", "subtitle")
-        self.done_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self.done_text)
-        lay.addStretch(1)
-        btns = QHBoxLayout()
-        btns.addStretch(1)
-        btns.addWidget(button("Done", slot=lambda: self.show_page(self.home)))
-        btns.addWidget(button("▶  Play now", "primary", lambda: self.last_app and self.play(self.last_app)))
-        btns.addStretch(1)
-        lay.addLayout(btns)
-
-    def show_page(self, page: QWidget) -> None:
-        self.stack.setCurrentWidget(page)
-        if page is self.home:
-            self.refresh_library()
-            self.install_btn.setFocus()
-
-    def refresh_library(self) -> None:
-        while self.rows.count():
-            w = self.rows.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-        apps = sorted(self.library.load(), key=lambda a: a.name.lower())
-        for app in apps:
-            self.rows.addWidget(AppRow(app, self))
-        self.library_title.setVisible(bool(apps))
-        free = core.human_size(core.free_space(self.paths.root))
-        self.space_label.setText(f"v{__version__}  ·  {free} free on internal storage")
-
-    # ── install flow ─────────────────────────────────────────────────────
-
-    def choose_installer(self) -> None:
-        start = Path.home() / "Downloads"
-        path = pick_file(self, "Choose a Windows installer", start if start.is_dir() else Path.home(),
-                         "Windows installers (*.exe *.EXE *.msi *.MSI);;All files (*)")
-        if path:
-            self.start_install(path)
-
-    def start_install(self, installer: Path, allow_no_container: bool = False) -> None:
-        if self.thread is not None:
+    def open_menu(self) -> None:
+        if QApplication.activeModalWidget() is not None:
             return
-        installer = Path(installer)
-        self.current_installer = installer
-        self.progress_title.setText(f"Installing {core.guess_name(installer)}")
-        self.status.setText("Getting ready…")
-        self.log_view.clear()
-        self.continue_btn.hide()
-        self.cancel_btn.setEnabled(True)
-        self.show_page(self.progress)
-        t = InstallThread(installer, self.paths, allow_no_container)
-        t.status.connect(self.on_status)
-        t.log.connect(self.log_view.appendPlainText)
-        t.done.connect(self.on_installed)
-        t.failed.connect(self.on_failed)
-        t.cancelled.connect(self.on_cancelled)
-        t.finished.connect(self._thread_finished)
-        self.thread = t
-        self.job = t.job
-        t.start()
-
-    def _thread_finished(self) -> None:
-        if self.job:
-            # The thread's signals die with it; route any later updates straight to the UI.
-            self.job.status = self.status.setText
-            self.job._log_cb = self.log_view.appendPlainText
-        if self.thread:
-            self.thread.deleteLater()
-        self.thread = None
-
-    def on_status(self, text: str) -> None:
-        self.status.setText(text)
-        self.continue_btn.setVisible(bool(self.thread) and self.thread.job.stage == "wait")
-
-    def toggle_log(self) -> None:
-        show = not self.log_view.isVisible()
-        self.log_view.setVisible(show)
-        self.details_btn.setText("Hide details" if show else "Show details")
-
-    def continue_now(self) -> None:
-        if self.thread:
-            self.continue_btn.hide()
-            self.thread.job.continue_now()
-
-    def cancel_install(self) -> None:
-        if self.thread:
-            self.cancel_btn.setEnabled(False)
-            self.status.setText("Cancelling…")
-            self.thread.job.cancel()
-
-    def on_cancelled(self) -> None:
-        self.show_page(self.home)
-
-    def on_failed(self, message: str) -> None:
-        self.show_page(self.home)
-        if message == "NO_RUNTIME":
-            box = QMessageBox(self)
-            box.setWindowTitle("Proton is needed")
-            box.setText("ProtonLaunch needs Proton to run Windows programs.\n\n"
-                        "Tap “Install Proton” and Steam will download it. "
-                        "When it finishes, try again.")
-            install = box.addButton("Install Proton", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton(QMessageBox.StandardButton.Close)
-            box.exec()
-            if box.clickedButton() is install:
-                QDesktopServices.openUrl(QUrl(f"steam://install/{core.PROTON_EXPERIMENTAL_APPID}"))
-            return
-        if message.startswith("NO_CONTAINER:"):
-            appid = message.split(":", 1)[1]
-            box = QMessageBox(self)
-            box.setWindowTitle("One more Steam download needed")
-            box.setText("Proton runs inside the “Steam Linux Runtime”, which isn't installed yet. "
-                        "Without it, installers often can't download anything.\n\n"
-                        "Tap “Install it” and Steam will download it (a few hundred MB). "
-                        "When it finishes, install your program again.")
-            install = box.addButton("Install it", QMessageBox.ButtonRole.AcceptRole)
-            anyway = box.addButton("Continue without it", QMessageBox.ButtonRole.DestructiveRole)
-            box.addButton(QMessageBox.StandardButton.Cancel)
-            box.exec()
-            if box.clickedButton() is install:
-                QDesktopServices.openUrl(QUrl(f"steam://install/{appid}"))
-            elif box.clickedButton() is anyway:
-                self.start_install(self.current_installer, allow_no_container=True)
-            return
-        QMessageBox.warning(self, "Install failed", message)
-
-    def on_installed(self, pending: core.PendingInstall) -> None:
-        self.pending = pending
-        cands = pending.candidates
-        if core.is_confident(cands, pending.installer):
-            self.finish(cands[0].exe, core.best_name(pending, cands[0]))
-            return
-        # Couldn't decide on our own: show the best guesses.
-        self.pick_list.clear()
-        drive_c = pending.pfx / "drive_c"
-        for c in cands[:12]:
-            try:
-                where = str(c.exe.parent.relative_to(drive_c))
-            except ValueError:
-                where = str(c.exe.parent)
-            item = QListWidgetItem(f"{c.exe.name}    —    {where}")
-            item.setData(Qt.ItemDataRole.UserRole, str(c.exe))
-            self.pick_list.addItem(item)
-        if cands:
-            self.pick_list.setCurrentRow(0)
-            self.pick_hint.setText("The installer finished. Pick the program to add to Steam.")
-        else:
-            self.pick_hint.setText("Nothing new was installed. If this file is the program itself "
-                                   "(no setup needed), tap the first button. Otherwise the installer "
-                                   "may have been closed early — cancel and try again.")
-        self.pick_title.setText("Which one is the program?" if cands else "Nothing was installed")
-        self.pick_list.setVisible(bool(cands))
-        self.use_btn.setVisible(bool(cands))
-        self.portable_btn.setVisible(pending.installer.suffix.lower() == ".exe")
-        self.portable_btn.setObjectName("" if cands else "primary")
-        self.portable_btn.style().polish(self.portable_btn)
-        self.name_edit.setText(pending.name)
-        self.show_page(self.pick)
-
-    def use_picked(self) -> None:
-        item = self.pick_list.currentItem()
-        if item and self.pending:
-            self.finish(Path(item.data(Qt.ItemDataRole.UserRole)), self.name_edit.text())
-
-    def browse_picked(self) -> None:
-        if not self.pending:
-            return
-        path = pick_file(self, "Choose the program", self.pending.pfx / "drive_c",
-                         "Programs (*.exe *.EXE);;All files (*)")
-        if path:
-            self.finish(path, self.name_edit.text())
-
-    def use_portable(self) -> None:
-        if self.pending:
-            self.finish(core.adopt_portable(self.pending), self.name_edit.text())
-
-    def discard_pending(self) -> None:
-        if self.pending:
-            if self.job:
-                self.job.close()
-            shutil.rmtree(self.pending.compat_dir, ignore_errors=True)
-            self.pending = None
-        self.show_page(self.home)
-
-    def finish(self, exe: Path, name: str) -> None:
-        pending, self.pending = self.pending, None
-        assert pending is not None and self.job is not None
-        try:
-            app = self.job.finish(pending, exe, name)
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "Couldn't finish", str(e))
-            self.show_page(self.home)
-            return
-        self.last_app = app
-        self.done_title.setText(f"✓  {app.name} is installed")
-        if app.steam_appid:
-            msg = "It's been added to your Steam library."
-            if core.steam_is_running():
-                msg += "\nRestart Steam to see it (Steam menu → Power → Restart Steam)."
-        else:
-            msg = "Couldn't find a Steam account to add it to — you can still play it from here."
-        self.done_text.setText(f"{msg}\n\nSteam will launch: {Path(app.exe).name}")
-        self.show_page(self.done)
-
-    # ── library actions ──────────────────────────────────────────────────
-
-    def play(self, app: core.App) -> None:
-        try:
-            core.launch(app)
-        except OSError as e:
-            QMessageBox.warning(self, "Couldn't start", str(e))
-
-    def change_exe(self, app: core.App) -> None:
-        path = pick_file(self, f"Choose the program for {app.name}", Path(app.prefix) / "pfx/drive_c",
-                         "Programs (*.exe *.EXE);;All files (*)")
-        if not path:
-            return
-        app.exe = str(path)
-        core.write_launcher(app, self.paths, (core.steam_roots() or [None])[0])
-        self.library.upsert(app)
-        self.refresh_library()
-
-    def remove(self, app: core.App) -> None:
-        ok = QMessageBox.question(
-            self, "Remove", f"Remove {app.name}?\n\nThis deletes the program, its saved data "
-            "and its Steam shortcut.",
-        )
-        if ok == QMessageBox.StandardButton.Yes:
-            core.uninstall(app, self.paths)
-            self.refresh_library()
+        options = ("Add ProtonLaunch to Steam", "Look for installers again", "About", "Quit ProtonLaunch", "Close")
+        choice = Sheet.ask(self, "Menu", "", options, primary=len(options) - 1)
+        if choice == 0:
+            self.add_self_to_steam()
+        elif choice == 1:
+            self.go_home()
+            self.flash("Checked Downloads, Desktop and SD cards")
+        elif choice == 2:
+            Sheet.ask(self, f"ProtonLaunch {__version__}",
+                      "Installs Windows programs and games on Steam Deck and adds them to your Steam library.\n\n"
+                      f"Installed programs: {self.paths.prefixes}\nInstall logs: {self.paths.logs}", ("Close",))
+        elif choice == 3:
+            self.close()
 
     def add_self_to_steam(self) -> None:
         exe = Path(sys.executable if getattr(sys, "frozen", False) else Path.home() / ".local/bin/protonlaunch")
         if not exe.exists():
-            QMessageBox.information(self, "Add to Steam", "Install ProtonLaunch with get.sh first.")
+            Sheet.ask(self, "Add to Steam", "Install ProtonLaunch with get.sh first.", ("Close",))
             return
-        _appid, users = core.add_steam_shortcut("ProtonLaunch", str(exe), str(exe.parent))
-        QMessageBox.information(
-            self, "Add to Steam",
-            "Added! Restart Steam to find ProtonLaunch in your library." if users
-            else "No Steam account found on this device.",
-        )
+        appid, users = core.add_steam_shortcut("ProtonLaunch", str(exe), str(exe.parent))
+        if users:
+            artwork.write_steam_artwork(appid, "ProtonLaunch", None, core.steam_grid_dirs())
+        Sheet.ask(self, "Add to Steam", "Added! Restart Steam to find ProtonLaunch in your library." if users
+                  else "No Steam account found on this device.", ("Close",))
 
-    # ── drag & drop ──────────────────────────────────────────────────────
+    # ── drag & drop, closing ─────────────────────────────────────────────
 
     def _dropped_installer(self, event) -> Path | None:
         urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
@@ -522,16 +845,18 @@ class MainWindow(QMainWindow):
     def dropEvent(self, event) -> None:  # noqa: N802
         p = self._dropped_installer(event)
         if p:
-            self.start_install(p)
+            self.confirm_install(p)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.thread is not None:
-            if QMessageBox.question(self, "Quit", "An install is running. Cancel it and quit?") \
-                    != QMessageBox.StandardButton.Yes:
+            if Sheet.ask(self, "Quit?", "An install is running. Cancel it and quit?", ("Keep installing", "Quit"),
+                         danger=(1,)) != 1:
                 event.ignore()
                 return
             self.thread.job.cancel()
             self.thread.wait(15000)
+        if self.nav:
+            self.nav.stop()
         event.accept()
 
 
@@ -543,14 +868,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if "-h" in args or "--help" in args:
         print("usage: protonlaunch [INSTALLER.exe|.msi]\n\n"
-              "Opens ProtonLaunch. Given an installer, starts installing it right away.")
+              "Opens ProtonLaunch. Given an installer, asks to install it right away.")
         return 0
     app = QApplication(argv[:1])
     app.setApplicationName("ProtonLaunch")
-    app.setStyleSheet(STYLE)
+    app.setStyle("Fusion")
+    app.setStyleSheet(theme.STYLE)
     win = MainWindow()
-    win.show()
+    if core.in_game_mode() or os.environ.get("PROTONLAUNCH_FULLSCREEN"):
+        win.showFullScreen()
+    else:
+        win.show()
     files = [a for a in args if not a.startswith("-")]
     if files:
-        QTimer.singleShot(0, lambda: win.start_install(Path(files[0])))
+        QTimer.singleShot(0, lambda: win.confirm_install(Path(files[0])))
     return app.exec()
