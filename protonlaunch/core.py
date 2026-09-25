@@ -4,6 +4,7 @@ Nothing in here imports Qt, so it can be tested headless and reused from the CLI
 """
 from __future__ import annotations
 
+import collections
 import json
 import os
 import re
@@ -246,9 +247,25 @@ _NAME_NOISE = {
 }
 
 
+_GENERIC_STEMS = {"setup", "install", "installer", "autorun", "start", "launcher", "app"}
+_GENERIC_FOLDERS = {"downloads", "download", "desktop", "home", "deck", "tmp", "temp", "documents"}
+
+
 def guess_name(installer: Path | str) -> str:
-    """Turn 'setup_the_witcher_3_goty_1.32_(10709).exe' into 'The Witcher 3 Goty'."""
-    stem = Path(installer).stem
+    """Turn 'setup_the_witcher_3_goty_1.32_(10709).exe' into 'The Witcher 3 Goty'.
+
+    A plain 'setup.exe' is named after the folder it's in ('Some Game [GOG]/setup.exe').
+    """
+    p = Path(installer)
+    name = _clean_name(p.stem)
+    if name.lower() in _GENERIC_STEMS and p.parent.name.lower() not in _GENERIC_FOLDERS:
+        folder = _clean_name(p.parent.name)
+        if folder and folder.lower() not in _GENERIC_STEMS:
+            return folder
+    return name
+
+
+def _clean_name(stem: str) -> str:
     s = re.sub(r"\(.*?\)|\[.*?\]", " ", stem)
     s = re.sub(r"(?i)(?<![a-z0-9])v?\d+(?:\.\d+)+[a-z]?(?![a-z0-9])", " ", s)  # 1.2.3, v2.0
     tokens: list[str] = []
@@ -769,6 +786,10 @@ def runtime_env(
     env.setdefault("WINEDEBUG", "-all")
     if rt.is_proton:
         env["STEAM_COMPAT_DATA_PATH"] = str(compat_dir)
+        # Steam always sets these. Without them GE-Proton's protonfixes looks for a number in
+        # STEAM_COMPAT_DATA_PATH and crashes before running anything if there is none.
+        env.setdefault("SteamAppId", "0")
+        env.setdefault("SteamGameId", "0")
         env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(steam_root or Path.home() / ".steam/steam")
         # Make Proton itself and anything outside the home folder visible inside the container.
         env["STEAM_COMPAT_TOOL_PATHS"] = str(Path(rt.path).parent)
@@ -883,6 +904,7 @@ def write_launcher(
         entry = container_entry_point(Path(app.runtime_path), roots)
         lines += [
             f"export STEAM_COMPAT_DATA_PATH={q(str(compat))}",
+            'export SteamAppId="${SteamAppId:-0}" SteamGameId="${SteamGameId:-0}"',
             f"export STEAM_COMPAT_CLIENT_INSTALL_PATH={q(client)}",
             f"PROTON={q(app.runtime_path)}",
             'if [ ! -x "$PROTON" ]; then',
@@ -948,6 +970,7 @@ class Installer:
         self.paths = paths or Paths.default()
         self.home = Path.home().resolve()
         self.entry: Path | None = None
+        self._tail: collections.deque[str] = collections.deque(maxlen=12)
         self.allow_no_container = allow_no_container
         self.library = Library(self.paths)
         self._roots = steam_roots() if steam_roots_override is None else steam_roots_override
@@ -969,6 +992,7 @@ class Installer:
 
     # logging
     def _log(self, msg: str) -> None:
+        self._tail.append(msg.rstrip("\n"))
         if self._log_fh:
             self._log_fh.write(msg.rstrip("\n") + "\n")
             self._log_fh.flush()
@@ -1068,6 +1092,10 @@ class Installer:
                 self._stream([ws, "-w"])
             if self._cancelled:
                 raise Cancelled()
+            if not (pfx / "system.reg").exists():
+                tail = "\n".join(line for line in self._tail if not line.startswith("$ "))[-1500:]
+                raise InstallError(f"{self.runtime.name} failed to start, so the installer never ran.\n\n"
+                                   f"Last lines of the log:\n{tail}")
 
             # 2. Show the home folder as D: and hide the full system drive Z: (see HOME_DRIVE).
             home = self.home
@@ -1108,6 +1136,10 @@ class Installer:
             return PendingInstall(app_id, name, self.installer, compat, self.runtime, cands, log_file)
         except Cancelled:
             self._log("Cancelled.")
+            self.close()
+            shutil.rmtree(compat, ignore_errors=True)
+            raise
+        except InstallError:
             self.close()
             shutil.rmtree(compat, ignore_errors=True)
             raise

@@ -28,12 +28,19 @@ def make_lnk(target: str) -> bytes:
 
 FAKE_PROTON = """#!/bin/bash
 [ "$1" = run ] || [ "$1" = waitforexitandrun ] || exit 2
+[ -n "$FAKE_BROKEN" ] && { echo "Traceback: proton exploded"; exit 1; }
+# Like GE-Proton's protonfixes: without an app id, it needs a number in the compat path.
+# (Checks only the folder name: temp dirs have random digits, /home/deck/... paths don't.)
+if [ -z "$SteamAppId$SteamGameId$UMU_ID" ] && ! [[ "$(basename "$STEAM_COMPAT_DATA_PATH")" =~ [0-9] ]]; then
+  echo "IndexError: list index out of range"; exit 1
+fi
 pfx="$STEAM_COMPAT_DATA_PATH/pfx"
 c="$pfx/drive_c"
 if [ "$2" = cmd.exe ]; then  # prefix setup, like real Proton: C: and Z: only
   mkdir -p "$c/windows/system32" "$pfx/dosdevices"
   ln -sfn ../drive_c "$pfx/dosdevices/c:"
   ln -sfn / "$pfx/dosdevices/z:"
+  touch "$pfx/system.reg"
   exit 0
 fi
 ls "$pfx/dosdevices" > "$STEAM_COMPAT_DATA_PATH/drives-during-install.txt"
@@ -117,6 +124,11 @@ class TestNaming(unittest.TestCase):
         }
         for f, want in cases.items():
             self.assertEqual(core.guess_name(f), want, f)
+
+    def test_plain_setup_named_after_folder(self):
+        self.assertEqual(core.guess_name("/x/Some Game [GOG]/setup.exe"), "Some Game")
+        self.assertEqual(core.guess_name("/x/Cool_Tool_v2.1/install.exe"), "Cool Tool")
+        self.assertEqual(core.guess_name("/home/deck/Downloads/setup.exe"), "setup")
 
     def test_slugify(self):
         self.assertEqual(core.slugify("The Witcher 3: GOTY"), "the-witcher-3-goty")
@@ -329,6 +341,28 @@ class TestInstallFlow(Env):
         self.assertIsNone(job.entry)
         self.assertFalse(self.entry_log.exists())
         self.assertIn("Warning: the Steam Linux Runtime", (self.paths.logs / "cool-game.log").read_text())
+
+    def test_proton_gets_an_app_id(self):
+        # 'setup' has no digits: GE-Proton's protonfixes would crash without SteamAppId.
+        inst = self.home / "Downloads" / "setup.exe"
+        inst.write_bytes(b"MZ")
+        for k in ("SteamAppId", "SteamGameId", "UMU_ID"):
+            os.environ.pop(k, None)
+        job = core.Installer(inst, self.paths, steam_roots_override=[self.steam])
+        pending = job.run()
+        self.assertEqual(pending.id, "setup")
+        app = job.finish(pending, pending.candidates[0].exe)
+        self.assertIn('SteamAppId="${SteamAppId:-0}"', Path(app.launcher).read_text())
+
+    def test_broken_proton_is_reported_not_nothing_installed(self):
+        os.environ["FAKE_BROKEN"] = "1"
+        with self.assertRaises(core.InstallError) as ctx:
+            self.job().run()
+        msg = str(ctx.exception)
+        self.assertIn("GE-Proton9-20 failed to start", msg)
+        self.assertIn("proton exploded", msg)
+        self.assertEqual(list(self.paths.prefixes.iterdir()), [])
+        self.assertTrue((self.paths.logs / "cool-game.log").exists())
 
     def test_msi_command(self):
         rt = core.Runtime("P", "proton", "/p/proton")
