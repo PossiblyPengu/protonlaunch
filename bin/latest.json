@@ -1,5 +1,5 @@
 {
-  "version": "2.6.0",
-  "sha256": "f0428a999532772b6e53c4ddb26ad0ac30aeeb47bffe549af7934b3629bd189e",
-  "notes": "More fixes: the D:/Z: drive fix now survives Proton's own setup, waiting for installers and cancelling work inside the Steam Linux Runtime, the Deck stays awake while installing, portable programs can bring their folder, one ProtonLaunch at a time (Open With hands off to the open window), and each launch writes a log for troubleshooting."
+  "version": "2.7.0",
+  "sha256": "8bedd7d01bad02751f70797e50e080f5ef9ad5114603a346d00741814f9371ea",
+  "notes": "Fixes duplicate Steam shortcuts: ProtonLaunch never edits Steam's shortcut list while Steam is running and never adds a program twice (\"Sent to Steam\" shows it's waiting on Steam). New: \u2630 Menu \u2192 Remove duplicate Steam shortcuts (with Steam closed) cleans up existing copies. Uninstalling while Steam runs tells you to remove the shortcut in Steam."
 }

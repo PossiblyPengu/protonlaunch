@@ -621,15 +621,17 @@ class DonePage(Page):
         self.app = app
         icon = artwork.load_icon(app.icon)
         self.art.setPixmap(pixmap(artwork.render("", app.name, icon), 460, 215))
-        if app.steam_added == "live":
+        how = app.steam_added
+        if how in ("live", "file"):
             self.heading.setText(f"✓  {app.name} is in your Steam library")
-            msg = "It's there now — no restart needed."
-        elif app.steam_added == "file" and not core.steam_is_running():
-            self.heading.setText(f"✓  {app.name} is in your Steam library")
-            msg = "It'll be there next time you open Steam."
-        elif app.steam_added == "file":
+            msg = "It's there now — no restart needed." if how == "live" else "It'll be there when Steam starts."
+        elif how == "requested":
+            self.heading.setText(f"✓  {app.name} is installed and sent to Steam")
+            msg = ("Look for it in your library under Non-Steam. If it's not there after restarting Steam, use "
+                   "☰ Menu → Installed programs → Add to Steam.")
+        elif how == "unavailable":
             self.heading.setText(f"✓  {app.name} is installed")
-            msg = steam_file_note()
+            msg = "Steam didn't respond, so it wasn't added. " + close_steam_first()
         else:
             self.heading.setText(f"✓  {app.name} is installed")
             msg = "No Steam account was found on this Deck, so it couldn't be added to Steam."
@@ -668,10 +670,24 @@ class DonePage(Page):
         return [("A", "Select", self.win.nav_activate), ("B", "Done", self.back)]
 
 
-def steam_file_note() -> str:
-    return ("Steam didn't confirm the new shortcut, and Steam may undo it when it restarts. If it's missing: "
-            "in Desktop Mode, exit Steam (Steam menu → Exit), open ProtonLaunch from the app menu and use "
-            "Installed programs → Add to Steam.")
+def close_steam_first(then: str = "☰ Menu → Installed programs → Add to Steam") -> str:
+    return ("To add it with Steam closed: in Desktop Mode, exit Steam (Steam menu → Exit), open ProtonLaunch "
+            f"from the app menu and use {then}.")
+
+
+REMOVE_IN_STEAM = "In Steam, open it and choose ⚙ → Manage → Remove non-Steam game from your library."
+STEAM_STATE = {"in": "In Steam", "sent": "Sent to Steam", "out": "Not in Steam"}
+
+
+def count_names(names: list[str], limit: int = 8) -> str:
+    """'• Name — 2 extra copies' lines for a list of duplicate shortcut names."""
+    import collections
+
+    counts = collections.Counter(names).most_common()
+    lines = [f"•  {n} — {c} extra cop{'y' if c == 1 else 'ies'}" for n, c in counts[:limit]]
+    if len(counts) > limit:
+        lines.append(f"…and {len(counts) - limit} more")
+    return "\n".join(lines)
 
 
 class InstalledPage(Page):
@@ -695,13 +711,15 @@ class InstalledPage(Page):
         lay.addWidget(self.empty)
         self.apps: dict[str, core.App] = {}
         self.sizes: dict[str, int] = {}
-        self.in_steam: dict[str, bool] = {}
+        self.steam: dict[str, str] = {}  # app id → core.steam_state
         self.thread: SizesThread | None = None
 
     def refresh(self) -> None:
         apps = sorted(self.win.library.load(), key=lambda a: a.installed_at, reverse=True)
         self.apps = {a.id: a for a in apps}
-        self.in_steam = {a.id: core.in_steam(a) for a in apps}  # read Steam's list once per refresh
+        roots, running = core.steam_roots(), core.steam_is_running()
+        entries = core.steam_shortcuts(roots)  # read Steam's list once per refresh
+        self.steam = {a.id: core.steam_state(a, roots, running, entries) for a in apps}
         self.list.clear()
         for app in apps:
             it = QListWidgetItem(self._text(app))
@@ -728,7 +746,7 @@ class InstalledPage(Page):
 
     def _text(self, app: core.App) -> str:
         size = core.human_size(self.sizes[app.id]) if app.id in self.sizes else "…"
-        where = "In Steam" if self.in_steam.get(app.id) else "Not in Steam"
+        where = STEAM_STATE[self.steam.get(app.id, "out")]
         return f"{app.name}\nInstalled {ago(app.installed_at)}  ·  {size}  ·  {where}"
 
     def _on_size(self, app_id: str, size: int) -> None:
@@ -742,8 +760,20 @@ class InstalledPage(Page):
         app = self.apps.get(item.data(Qt.ItemDataRole.UserRole))
         if app is None or self.win.busy_with("uninstall"):
             return
-        if self.in_steam.get(app.id):
+        state = self.steam.get(app.id, "out")
+        if state == "in":
             self.win.uninstall(app, self.sizes.get(app.id))
+            return
+        if state == "sent":
+            choice = Sheet.ask(self, app.name,
+                               f"ProtonLaunch sent this to Steam {ago(app.steam_requested_at)}. Steam hasn't saved "
+                               "its list of shortcuts since, so ProtonLaunch can't check it yet — look in your "
+                               "library under Non-Steam.\n\nOnly send it again if it's not there: otherwise "
+                               "you'll get a duplicate.", ("Uninstall", "Send to Steam again", "Cancel"), primary=2)
+            if choice == 0:
+                self.win.uninstall(app, self.sizes.get(app.id))
+            elif choice == 1:
+                self.win.add_to_steam(app)
             return
         choice = Sheet.ask(self, app.name, "This program isn't in your Steam library.",
                            ("Add to Steam", "Uninstall", "Cancel"))
@@ -885,7 +915,12 @@ class MainWindow(QMainWindow):
         # A bound method (not a lambda): Qt disconnects it automatically when the window goes away.
         QApplication.instance().focusChanged.connect(self._focus_changed)
         self.refresh_launchers()
+        self.sync_steam_ids()
         self.go(self.home)
+        dupes = core.find_duplicate_shortcuts(None, self.paths.launchers)
+        if dupes:
+            self.flash(f"Steam has {len(dupes)} duplicate shortcut{'s' * (len(dupes) != 1)} — "
+                       "☰ Menu → Remove duplicate Steam shortcuts", ms=8000)
         if check_updates is None:
             check_updates = updater.self_path() is not None and not os.environ.get("PROTONLAUNCH_NO_UPDATE_CHECK")
         if check_updates:
@@ -1172,15 +1207,24 @@ class MainWindow(QMainWindow):
         self.flash(f"Adding {app.name} to Steam…")
 
         def run(_status) -> core.App:
-            app.steam_appid, app.steam_added = core.add_to_steam(app)
+            core.add_to_steam(app)
             return app
 
         def finished(a: core.App) -> None:
-            self._write_art(a, artwork.load_icon(a.icon))
-            if a.steam_added == "live":
+            how = a.steam_added
+            if how in ("live", "file", "requested"):
+                self._write_art(a, artwork.load_icon(a.icon))
+            else:
+                self.library.upsert(a)
+            if how == "live":
                 self.flash(f"{a.name} is in your Steam library")
-            elif a.steam_added == "file":
-                Sheet.ask(self, "Almost there", steam_file_note(), ("Close",))
+            elif how == "file":
+                self.flash(f"{a.name} will be in your Steam library when Steam starts")
+            elif how == "requested":
+                self.flash(f"Sent {a.name} to Steam — look in your library under Non-Steam", ms=5000)
+            elif how == "unavailable":
+                Sheet.ask(self, "Couldn't reach Steam", "Steam didn't respond, so nothing was added.\n\n"
+                          + close_steam_first(), ("Close",))
             else:
                 Sheet.ask(self, "Couldn't add to Steam", "No Steam account was found on this Deck.", ("Close",))
             if self.stack.currentWidget() is self.installed:
@@ -1190,6 +1234,39 @@ class MainWindow(QMainWindow):
             return
         self.run_worker(run, finished, lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)),
                         kind="steam")
+
+    def sync_steam_ids(self) -> None:
+        """Steam may give a shortcut an id of its own, or save one we handed it later: follow it, so
+        the program's artwork is filed under the id Steam uses."""
+        entries = core.steam_shortcuts()
+        for app in self.library.load():
+            if core.sync_steam_appid(app, entries):
+                self._write_art(app, artwork.load_icon(app.icon))
+
+    def remove_duplicates(self) -> None:
+        roots = core.steam_roots()
+        names = core.find_duplicate_shortcuts(roots, self.paths.launchers)
+        running = core.steam_is_running()
+        if not names:
+            note = " (Steam is open: anything added since it last saved its list isn't in it yet.)" if running else ""
+            Sheet.ask(self, "No duplicates", "Steam's list of non-Steam shortcuts has no duplicates." + note,
+                      ("Close",))
+            return
+        found = f"Steam's list has {len(names)} extra cop{'y' if len(names) == 1 else 'ies'} of shortcuts:\n" \
+                + count_names(names)
+        if running:
+            Sheet.ask(self, "Close Steam first", found + "\n\nSteam is open, and would put them back the next time "
+                      "it saves its list. To remove them all at once: in Desktop Mode, exit Steam (Steam menu → "
+                      "Exit), open ProtonLaunch from the app menu and pick ☰ Menu → Remove duplicate Steam "
+                      "shortcuts again.\n\nOr one at a time: " + REMOVE_IN_STEAM, ("Close",))
+            return
+        if Sheet.ask(self, "Remove duplicate shortcuts?", found + "\n\nOne of each stays. A backup of Steam's list "
+                     "is kept next to it (shortcuts.vdf.before-dedupe).", ("Remove duplicates", "Cancel")) != 0:
+            return
+        n = core.remove_duplicate_shortcuts(roots, self.paths.launchers,
+                                            [a.steam_appid for a in self.library.load()])
+        self.sync_steam_ids()
+        self.flash(f"Removed {n} duplicate shortcut{'s' * (n != 1)}")
 
     def refresh_launchers(self) -> None:
         """Rewrite launch scripts so programs installed by older versions get current fixes."""
@@ -1206,26 +1283,28 @@ class MainWindow(QMainWindow):
     def open_menu(self) -> None:
         if Sheet.current is not None:
             return
-        options = ("Installed programs (uninstall)", "Check for updates", "Add ProtonLaunch to Steam",
-                   "Look for installers again", "About", "Quit ProtonLaunch", "Close")
-        choice = Sheet.ask(self, "Menu", "", options, primary=len(options) - 1)
-        if choice == 0:
-            self.show_installed()
-            return
-        choice -= 1
-        if choice == 0:
-            self.check_for_updates(manual=True)
-        elif choice == 1:
-            self.add_self_to_steam()
-        elif choice == 2:
+        def look_again() -> None:
             self.go_home()
             self.flash("Checked Downloads, Desktop and SD cards")
-        elif choice == 3:
+
+        def about() -> None:
             Sheet.ask(self, f"ProtonLaunch {__version__}",
                       "Installs Windows programs and games on Steam Deck and adds them to your Steam library.\n\n"
                       f"Installed programs: {self.paths.prefixes}\nInstall logs: {self.paths.logs}", ("Close",))
-        elif choice == 4:
-            self.close()
+
+        items = [
+            ("Installed programs (uninstall)", self.show_installed),
+            ("Check for updates", lambda: self.check_for_updates(manual=True)),
+            ("Add ProtonLaunch to Steam", self.add_self_to_steam),
+            ("Remove duplicate Steam shortcuts", self.remove_duplicates),
+            ("Look for installers again", look_again),
+            ("About", about),
+            ("Quit ProtonLaunch", self.close),
+            ("Close", None),
+        ]
+        choice = Sheet.ask(self, "Menu", "", tuple(t for t, _ in items), primary=len(items) - 1)
+        if 0 <= choice < len(items) and items[choice][1] is not None:
+            items[choice][1]()
 
     # ── uninstalling ─────────────────────────────────────────────────────
 
@@ -1240,7 +1319,11 @@ class MainWindow(QMainWindow):
         parts = ["the program and anything saved inside its Windows folder (many games keep their saves "
                  "there)"]
         parts += [f"its folder {breakable(d)}" for d in extra]
-        parts.append("its Steam shortcut and artwork" if app.steam_appid else "its shortcut")
+        running = core.steam_is_running()
+        if app.steam_appid and running:
+            parts.append("its Steam artwork (Steam is open, so you'll remove the shortcut itself in Steam)")
+        else:
+            parts.append("its Steam shortcut and artwork" if app.steam_appid else "its shortcut")
         freed = f"This frees {core.human_size(size)}.\n\n" if size else ""
         text = freed + "Deletes " + "; ".join(parts) + "."
         if Sheet.ask(self, f"Uninstall {app.name}?", text, ("Uninstall", "Keep"), primary=1, danger=(0,)) != 0:
@@ -1248,13 +1331,11 @@ class MainWindow(QMainWindow):
         # Deleting a big game can take a while: do it in the background (the list shows it's going).
         self.flash(f"Uninstalling {app.name}…", ms=60_000)
 
-        def finished(_result) -> None:
+        def finished(left_in_steam: bool) -> None:
             self.installed.sizes.pop(app.id, None)
             msg = f"{app.name} uninstalled"
             if size:
                 msg += f" — freed {core.human_size(size)}"
-            if app.steam_appid and core.steam_is_running():
-                msg += ". If it's still listed in Steam, remove it there too."
             self.flash(msg)
             self.refresh_space()
             if self.stack.currentWidget() is self.installed:
@@ -1262,6 +1343,10 @@ class MainWindow(QMainWindow):
                     self.installed.enter()
                 else:
                     self.go_home()
+            if left_in_steam:
+                Sheet.ask(self, msg, "Its shortcut is still in your Steam library: ProtonLaunch doesn't change "
+                          "Steam's list while Steam is open (Steam would undo it or duplicate it).\n\n"
+                          + REMOVE_IN_STEAM, ("Close",))
 
         self.run_worker(lambda _s: core.uninstall(app, self.paths), finished,
                         lambda m: Sheet.ask(self, "Couldn't uninstall", m, ("Close",)), kind="uninstall")
@@ -1352,16 +1437,30 @@ class MainWindow(QMainWindow):
         if core.find_shortcut(str(exe)):
             Sheet.ask(self, "Add to Steam", "ProtonLaunch is already in your Steam library.", ("Close",))
             return
+        sent = self.paths.state().get("self_steam_requested_at", 0)
+        if sent and core.steam_is_running() and core.shortcuts_saved_at() < sent:
+            if Sheet.ask(self, "Add to Steam", f"ProtonLaunch was sent to Steam {ago(sent)}. Steam hasn't saved its "
+                         "list of shortcuts since, so ProtonLaunch can't check it yet — look in your library under "
+                         "Non-Steam.\n\nOnly send it again if it's not there: otherwise you'll get a duplicate.",
+                         ("Close", "Send again")) != 1:
+                return
         if self.busy_with("steam"):
             return
         self.flash("Adding ProtonLaunch to Steam…")
+        started = time.time()
 
         def finished(result) -> None:
             appid, how = result
-            if how:
+            if how == "requested":
+                self.paths.remember(self_steam_requested_at=started)
+            if how in ("live", "file", "requested"):
                 artwork.write_steam_artwork(appid, "ProtonLaunch", None, core.steam_grid_dirs())
             msg = {"live": "Done — ProtonLaunch is in your Steam library.",
-                   "file": steam_file_note()}.get(how, "No Steam account found on this device.")
+                   "file": "Done — ProtonLaunch will be in your Steam library when Steam starts.",
+                   "requested": "Sent to Steam — look in your library under Non-Steam.",
+                   "unavailable": "Steam didn't respond, so nothing was added.\n\n"
+                                  + close_steam_first("☰ Menu → Add ProtonLaunch to Steam"),
+                   }.get(how, "No Steam account found on this device.")
             Sheet.ask(self, "Add to Steam", msg, ("Close",))
 
         self.run_worker(lambda _s: core.add_shortcut("ProtonLaunch", str(exe), str(exe.parent)), finished,
