@@ -82,7 +82,7 @@ class UpdateTests(unittest.TestCase):
         offline = lambda: updater.from_manifest("http://127.0.0.1:9/bin")  # noqa: E731
         u = updater.check("2.1.0", [old_release, broken, offline, dev, main])
         self.assertEqual((u.version, u.notes), ("2.3.0", "Controller fixes"))
-        self.assertTrue(u.url.endswith(f"/main/bin/{updater.ASSET}"))
+        self.assertIn(f"/main/bin/{updater.ASSET}?t=", u.url)  # cache-busted, like latest.json
         self.assertIsNone(updater.check("2.3.0", [old_release, main, dev]))
         errors = []
         self.assertIsNone(updater.check("2.1.0", [broken, offline], errors=errors))

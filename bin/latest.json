@@ -1,5 +1,5 @@
 {
-  "version": "2.5.0",
-  "sha256": "a3393e52b2c55149fb8166bbbff16bdbfa66d54f7a3e240ec1a26f15b1ca3c16",
-  "notes": "Fixes: Add ProtonLaunch to Steam now sticks, no freeze when uninstalling big games, no crash when quitting mid-task, dialogs work in Game Mode, long paths no longer push buttons off-screen. Launches programs with their shortcut's arguments."
+  "version": "2.5.1",
+  "sha256": "1823593a98b86be8499c9f26e0633c83b3915a14a2a965d8f56cb417a4f34336",
+  "notes": "Fixes: Add ProtonLaunch to Steam now sticks, no freeze when uninstalling big games, no crash when quitting mid-task, dialogs work in Game Mode, long paths no longer push buttons off-screen, updates right after a release no longer fail. Launches programs with their shortcut's arguments."
 }

@@ -105,7 +105,8 @@ def from_manifest(base_url: str) -> Update | None:
     """bin/latest.json next to a prebuilt binary: {"version", "sha256", "notes"?}."""
     # The query defeats raw.githubusercontent's ~5 minute cache (including cached 404s).
     data = json.loads(fetch(f"{base_url}/latest.json?t={int(time.time())}"))
-    return Update(str(data["version"]), f"{base_url}/{ASSET}", str(data["sha256"]).lower(),
+    # Same for the binary: a cached older copy would fail the checksum right after a release.
+    return Update(str(data["version"]), f"{base_url}/{ASSET}?t={int(time.time())}", str(data["sha256"]).lower(),
                   str(data.get("notes", ""))[:600], base_url)
 
 
