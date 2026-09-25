@@ -1,5 +1,5 @@
 {
-  "version": "2.4.0",
-  "sha256": "5e5123b3c34ce490ae588044c91bb9e52ecf28a78b82b8b3580cd625cf863fc0",
-  "notes": "Games now reliably appear in Steam (added through Steam itself, no restart). Add to Steam from Installed programs. Desktop Mode menu entries."
+  "version": "2.5.0",
+  "sha256": "a3393e52b2c55149fb8166bbbff16bdbfa66d54f7a3e240ec1a26f15b1ca3c16",
+  "notes": "Fixes: Add ProtonLaunch to Steam now sticks, no freeze when uninstalling big games, no crash when quitting mid-task, dialogs work in Game Mode, long paths no longer push buttons off-screen. Launches programs with their shortcut's arguments."
 }

@@ -76,8 +76,8 @@ class PadState:
         return [(n.split("-", 1)[-1], on) for n, on in out]
 
 
-def read_loop(emit: Callable[[str, bool], None], stop: Callable[[], bool], rescan_every: float = 3.0) -> None:
-    """Blocking loop: read every joystick, call emit(action, pressed). Returns when stop() is true."""
+def read_loop(emit: Callable[[str, bool, str], None], stop: Callable[[], bool], rescan_every: float = 3.0) -> None:
+    """Blocking loop: read every joystick, call emit(action, pressed, device). Returns when stop() is true."""
     fds: dict[int, tuple[str, PadState]] = {}
     last_scan = -1e9
     import time
@@ -110,10 +110,10 @@ def read_loop(emit: Callable[[str, bool], None], stop: Callable[[], bool], resca
                 os.close(fd)
                 fds.pop(fd, None)
                 continue
-            state = fds[fd][1]
+            path, state = fds[fd]
             for i in range(0, len(data) - _EVENT.size + 1, _EVENT.size):
                 _s, _us, etype, code, value = _EVENT.unpack_from(data, i)
                 for action, pressed in state.feed(etype, code, value):
-                    emit(action, pressed)
+                    emit(action, pressed, path)
     for fd in fds:
         os.close(fd)

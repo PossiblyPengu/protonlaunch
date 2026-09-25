@@ -14,6 +14,7 @@ import re
 import ssl
 import sys
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,7 +71,11 @@ def _ssl_context() -> ssl.SSLContext:
 def _open(url: str, timeout: float):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
     ctx = _ssl_context() if url.startswith("https:") else None
-    return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    except urllib.error.HTTPError as e:
+        e.close()  # an HTTP error still holds the open connection
+        raise UpdateError(f"HTTP {e.code} for {url.split('?')[0]}") from None
 
 
 def fetch(url: str, timeout: float = 8.0, limit: int = 1 << 20) -> bytes:

@@ -14,17 +14,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from protonlaunch import core  # noqa: E402
 
 
-def make_lnk(target: str) -> bytes:
-    """Minimal Shell Link with only a LinkInfo local base path (what Wine writes)."""
+def make_lnk(target: str | None, args: str = "", workdir: str = "", relative: str = "") -> bytes:
+    """A Shell Link like Wine writes: LinkInfo local base path, plus optional Unicode StringData
+    (relative path, working dir, arguments)."""
+    flags = 0x80  # IsUnicode
+    info = b""
+    if target:
+        flags |= 0x02  # HasLinkInfo
+        volume = struct.pack("<IIII", 0x11, 3, 0, 0x10) + b"\x00"
+        base = target.encode("cp1252") + b"\x00"
+        hdr = 0x1C
+        size = hdr + len(volume) + len(base) + 1
+        info = struct.pack("<7I", size, hdr, 1, hdr, hdr + len(volume), 0, size - 1) + volume + base + b"\x00"
+    strings = b""
+    for bit, value in ((0x08, relative), (0x10, workdir), (0x20, args)):
+        if value:
+            flags |= bit
+            strings += struct.pack("<H", len(value)) + value.encode("utf-16-le")
     header = bytearray(0x4C)
     header[0:4] = b"L\x00\x00\x00"
-    struct.pack_into("<I", header, 0x14, 0x02)  # HasLinkInfo
-    volume = struct.pack("<IIII", 0x11, 3, 0, 0x10) + b"\x00"
-    base = target.encode("cp1252") + b"\x00"
-    hdr = 0x1C
-    size = hdr + len(volume) + len(base) + 1
-    info = struct.pack("<7I", size, hdr, 1, hdr, hdr + len(volume), 0, size - 1) + volume + base + b"\x00"
-    return bytes(header) + info
+    struct.pack_into("<I", header, 0x14, flags)
+    return bytes(header) + info + strings
 
 
 def make_pe(icon: bytes, width: int = 48, bits: int = 32) -> bytes:
@@ -292,6 +302,24 @@ class TestGamepad(unittest.TestCase):
         self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 12000), [])  # hysteresis keeps it held
         self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 2000), [("right", False)])
         self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, -30000), [("left", True)])
+
+
+class TestLnkDetails(unittest.TestCase):
+    def test_args_workdir_relative(self):
+        data = make_lnk(r"C:\Games\X\x.exe", args='-windowed "some profile"', workdir=r"C:\Games\X\data")
+        info = core.lnk_info(data)
+        self.assertEqual((info.target, info.workdir, info.args),
+                         (r"C:\Games\X\x.exe", r"C:\Games\X\data", '-windowed "some profile"'))
+        self.assertEqual(core.split_windows_args(info.args), ["-windowed", "some profile"])
+        only_rel = core.lnk_info(make_lnk(None, relative=r"..\..\Games\X\x.exe"))
+        self.assertEqual((only_rel.target, only_rel.relative), (None, r"..\..\Games\X\x.exe"))
+        self.assertIsNone(core.lnk_info(make_lnk(None)))
+
+    def test_split_windows_args(self):
+        self.assertEqual(core.split_windows_args('a "b c" d'), ["a", "b c", "d"])
+        self.assertEqual(core.split_windows_args('-path="C:\\x y"  -z'), ["-path=C:\\x y", "-z"])
+        self.assertEqual(core.split_windows_args('""'), [""])
+        self.assertEqual(core.split_windows_args(""), [])
 
 
 class TestVdf(unittest.TestCase):
@@ -653,6 +681,53 @@ class TestInstallFlow(Env):
         self.assertTrue(core.desktop_entry_path(app).exists())
         core.uninstall(app, self.paths, roots=[self.steam])
         self.assertFalse(core.desktop_entry_path(app).exists())
+
+    def test_shortcut_args_and_start_folder_reach_the_launcher(self):
+        lnk = self.tmp / "x.lnk"
+        lnk.write_bytes(make_lnk(r"C:\Program Files\Cool Game\bin\CoolGame.exe",
+                                 args='-skipintro -profile "My Save"', workdir=r"C:\Program Files\Cool Game"))
+        os.environ["FAKE_LNK"] = str(lnk)
+        job = self.job()
+        pending = job.run()
+        top = pending.candidates[0]
+        self.assertEqual(top.args, ["-skipintro", "-profile", "My Save"])
+        app = job.finish(pending, top.exe)
+        self.assertEqual(app.args, ["-skipintro", "-profile", "My Save"])
+        self.assertTrue(app.workdir.endswith("Cool Game"))
+        script = Path(app.launcher).read_text()
+        self.assertIn("CoolGame.exe' -skipintro -profile 'My Save' \"$@\"", script)
+        import shlex
+        self.assertIn(f"cd {shlex.quote(app.workdir)} ", script)
+
+    def test_launcher_restores_hidden_z(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        z = pending.pfx / "dosdevices/z:"
+        z.unlink()  # as if an install was interrupted while Z: was hidden
+        env = dict(os.environ, PATH=os.environ["PATH"])
+        import subprocess
+        subprocess.run(["bash", app.launcher], env=env, capture_output=True, timeout=30)
+        self.assertEqual(os.readlink(z), "/")
+
+    def test_prefers_proton_whose_runtime_is_installed(self):
+        # A newer GE-Proton needing a runtime that isn't installed, next to one that is ready.
+        newer = self.steam / "compatibilitytools.d/GE-Proton99-1"
+        newer.mkdir(parents=True)
+        (newer / "proton").write_text(self.proton.read_text())
+        (newer / "proton").chmod(0o755)
+        (newer / "toolmanifest.vdf").write_text('"manifest" { "require_tool_appid" "9999999" }')
+        job = self.job()
+        pending = job.run()
+        job.close()
+        self.assertEqual(pending.runtime.name, "GE-Proton9-20")
+
+    def test_damaged_library_entry_is_skipped(self):
+        self.paths.root.mkdir(parents=True, exist_ok=True)
+        self.paths.library_file.write_text('[{"id": "broken"}, {"id": "ok", "name": "OK", "exe": "/x", '
+                                           '"prefix": "/p", "runtime_name": "P", "runtime_kind": "proton", '
+                                           '"runtime_path": "/r"}]')
+        self.assertEqual([a.id for a in core.Library(self.paths).load()], ["ok"])
 
     def test_cancel_restores_nothing_left_behind(self):
         os.environ["FAKE_SLEEP"] = "30"
