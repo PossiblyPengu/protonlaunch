@@ -12,6 +12,7 @@ ProtonLaunch does these steps for you:
 - **Makes a separate Windows setup (prefix)** for each program, so one program can't break another
 - **Finds the installed program** from the shortcuts its installer made, skipping uninstallers, redistributables and crash reporters. If it can't tell, it shows you its best guesses.
 - **Adds it to Steam** for every Steam account on the Deck, under the name from the program's shortcut
+- **Shows your internal storage as D: in the installer.** Proton only maps C: (the program's own Windows folder, which lives in your home folder) and Z: ("rootfs": SteamOS's small, read-only system partition). Installers that look at Z: complain there's no space. While installing, ProtonLaunch hides Z:, adds D: = `/home/deck` and starts the installer from there. Z: comes back afterwards so the program runs normally.
 - **Handles programs that need no install**: if the file *is* the program, one tap adds it as-is
 
 ## Install (Steam Deck)

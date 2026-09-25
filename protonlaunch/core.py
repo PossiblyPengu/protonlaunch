@@ -373,9 +373,36 @@ def looks_like_installer(exe: Path, installer: Path | None = None) -> bool:
     return False
 
 
-def find_program(pfx: Path, name_hint: str = "", installer: Path | None = None) -> list[Candidate]:
+def snapshot_dirs(root: Path, depth: int = 3) -> set[Path]:
+    """Visible directories under root, a few levels deep — to spot what an installer created."""
+    out: set[Path] = set()
+    seen = 0
+    for dirpath, dirnames, _files in os.walk(root):
+        seen += 1
+        if seen > _WALK_LIMIT:
+            break
+        cur = Path(dirpath)
+        level = len(cur.relative_to(root).parts)
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")] if level < depth else []
+        out.update(cur / d for d in dirnames)
+    return out
+
+
+def new_top_dirs(before: set[Path], after: set[Path]) -> list[Path]:
+    """Directories in `after` that didn't exist before, without their own subfolders."""
+    new = after - before
+    return sorted(d for d in new if d.parent not in new)
+
+
+def find_program(
+    pfx: Path,
+    name_hint: str = "",
+    installer: Path | None = None,
+    extra_dirs: Iterable[Path] = (),
+) -> list[Candidate]:
     """Rank the installed executables in a prefix by how likely each is 'the program'. Best first.
 
+    `extra_dirs` are folders the installer created outside C: (e.g. on D:, the home folder).
     Copies of the installer itself are never returned: the goal is the finished product.
     """
     drive_c = pfx / "drive_c"
@@ -390,9 +417,13 @@ def find_program(pfx: Path, name_hint: str = "", installer: Path | None = None) 
             cands[key] = Candidate(exe=p, score=0.0)
         return cands[key]
 
-    for exe in scan_exes(drive_c):
+    found = [(exe, drive_c) for exe in scan_exes(drive_c)]
+    for d in extra_dirs:
+        # An installer-created folder is like "Program Files\X": score from the same depth.
+        found += [(exe, d.parent.parent) for exe in scan_exes(d)]
+    for exe, base in found:
         c = cand(exe)
-        rel = exe.relative_to(drive_c)
+        rel = exe.relative_to(base)
         c.score -= 3 * (len(rel.parts) - 1)
         try:
             size_mb = exe.stat().st_size / 1_000_000
@@ -694,10 +725,78 @@ def runtime_env(rt: Runtime, compat_dir: Path, steam_root: Path | None) -> dict[
     return env
 
 
-def run_command(rt: Runtime, target: Path) -> list[str]:
-    """Command line that runs a Windows .exe/.msi under the runtime."""
-    args = ["msiexec", "/i", str(target)] if target.suffix.lower() == ".msi" else [str(target)]
+def run_command(rt: Runtime, target: str | Path, *extra: str) -> list[str]:
+    """Command line that runs a Windows .exe/.msi (unix or Windows path) under the runtime."""
+    target = str(target)
+    args = ["msiexec", "/i", target] if target.lower().endswith(".msi") else [target, *extra]
     return [rt.path, "run", *args] if rt.is_proton else [rt.path, *args]
+
+
+# ── Drive letters ────────────────────────────────────────────────────────────
+#
+# Proton maps only C: (the prefix) and Z: (the whole filesystem, "/"). On SteamOS "/" is the
+# small read-only system partition ("rootfs"), so installers that look at Z: — or that default
+# to the drive they were started from — report "not enough space". While installing we hide Z:,
+# expose the home folder (where the free space is) as D:, and start the installer from there.
+
+HOME_DRIVE = "d"
+INSTALLER_DRIVE = "e"  # only used when the installer lives outside the home folder
+
+
+def _dosdevices(pfx: Path) -> Path:
+    return pfx / "dosdevices"
+
+
+def map_drive(pfx: Path, letter: str, target: Path) -> None:
+    link = _dosdevices(pfx) / f"{letter}:"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    if link.is_symlink() or link.exists():
+        if link.is_symlink() and os.readlink(link) == str(target):
+            return
+        link.unlink()
+    os.symlink(str(target), link)
+
+
+def to_windows_path(letter: str, root: Path, path: Path) -> str:
+    rel = path.relative_to(root)
+    return f"{letter.upper()}:\\" + "\\".join(rel.parts)
+
+
+def hide_system_drive(pfx: Path) -> str | None:
+    """Remove Z: for the duration of an install. Returns its old target for restore_system_drive."""
+    z = _dosdevices(pfx) / "z:"
+    if not z.is_symlink():
+        return None
+    target = os.readlink(z)
+    z.unlink()
+    return target
+
+
+def restore_system_drive(pfx: Path, target: str | None) -> None:
+    if target is None:
+        return
+    z = _dosdevices(pfx) / "z:"
+    if not z.is_symlink() and not z.exists():
+        os.symlink(target, z)
+
+
+def free_space(path: Path) -> int:
+    """Free bytes on the filesystem holding path (or its nearest existing parent)."""
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return 0
+
+
+def human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB", "MB") else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n} B"
 
 
 def write_launcher(app: App, paths: Paths, steam_root: Path | None) -> Path:
@@ -773,6 +872,7 @@ class Installer:
     ):
         self.installer = Path(installer).expanduser().resolve()
         self.paths = paths or Paths.default()
+        self.home = Path.home().resolve()
         self.library = Library(self.paths)
         self._roots = steam_roots() if steam_roots_override is None else steam_roots_override
         self.steam_root = steam_root or (self._roots[0] if self._roots else None)
@@ -869,23 +969,53 @@ class Installer:
         self._log(f"ProtonLaunch: installing {self.installer.name} as '{name}'")
         self._log(f"Runtime: {self.runtime.name} ({self.runtime.path})")
 
+        pfx = compat / "pfx"
+        hidden_z: str | None = None
+        ws = self.runtime.wineserver()
         try:
+            # 1. Create the Windows environment first, so its drives can be adjusted.
+            self._set("prepare", "Setting up Windows… (takes a minute the first time)")
+            self._stream(run_command(self.runtime, "cmd.exe", "/c", "exit"))
+            if ws:
+                self._stream([ws, "-w"])
+            if self._cancelled:
+                raise Cancelled()
+
+            # 2. Show the home folder as D: and hide the full system drive Z: (see HOME_DRIVE).
+            home = self.home
+            map_drive(pfx, HOME_DRIVE, home)
+            try:
+                target = to_windows_path(HOME_DRIVE, home, self.installer)
+            except ValueError:
+                map_drive(pfx, INSTALLER_DRIVE, self.installer.parent)
+                target = to_windows_path(INSTALLER_DRIVE, self.installer.parent, self.installer)
+            hidden_z = hide_system_drive(pfx)
+            self._log(f"Drives: C: = {pfx / 'drive_c'} ({human_size(free_space(pfx))} free), "
+                      f"D: = {home} ({human_size(free_space(home))} free); Z: hidden")
+            home_before = snapshot_dirs(home)
+
+            # 3. Run the installer.
             self._set("installer", "Running the installer — follow the steps on screen.\n"
-                      "The first run takes a minute while Windows is set up.")
-            rc = self._stream(run_command(self.runtime, self.installer))
+                      f"Install to C: or D: (both have {human_size(free_space(home))} free).")
+            rc = self._stream(run_command(self.runtime, target))
             self._log(f"Installer exited with code {rc}")
             if self._cancelled:
                 raise Cancelled()
 
-            ws = self.runtime.wineserver()
             if ws and not self._skip_wait:
                 self._set("wait", "Waiting for the installer's windows to close…")
                 self._stream([ws, "-w"])
             if self._cancelled:
                 raise Cancelled()
+            restore_system_drive(pfx, hidden_z)
+            hidden_z = None
 
             self._set("scan", "Finding the installed program…")
-            cands = find_program(compat / "pfx", name, self.installer)
+            extra = [d for d in new_top_dirs(home_before, snapshot_dirs(home))
+                     if not d.resolve().is_relative_to(self.paths.root.resolve())]
+            if extra:
+                self._log("New folders outside C: " + ", ".join(map(str, extra)))
+            cands = find_program(pfx, name, self.installer, extra)
             self._log("Candidates: " + ", ".join(f"{c.exe.name}={c.score:.0f}" for c in cands[:8]))
             return PendingInstall(app_id, name, self.installer, compat, self.runtime, cands, log_file)
         except Cancelled:
@@ -896,6 +1026,9 @@ class Installer:
         except BaseException:
             self.close()
             raise
+        finally:
+            if compat.exists():
+                restore_system_drive(pfx, hidden_z)
 
     def close(self) -> None:
         if self._log_fh:
@@ -908,7 +1041,7 @@ class Installer:
         app = App(
             id=pending.id,
             name=" ".join((name or "").split()) or pending.name,
-            exe=str(exe),
+            exe=str(Path(exe).resolve()),
             prefix=str(pending.compat_dir),
             runtime_name=pending.runtime.name,
             runtime_kind=pending.runtime.kind,

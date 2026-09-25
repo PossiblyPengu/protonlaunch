@@ -184,7 +184,8 @@ class MainWindow(QMainWindow):
         scroll.setWidget(holder)
         lay.addWidget(scroll, 1)
         foot = QHBoxLayout()
-        foot.addWidget(label(f"v{__version__}", "muted", wrap=False))
+        self.space_label = label("", "muted", wrap=False)
+        foot.addWidget(self.space_label)
         foot.addStretch(1)
         foot.addWidget(button("Add ProtonLaunch to Steam", slot=self.add_self_to_steam))
         lay.addLayout(foot)
@@ -275,6 +276,8 @@ class MainWindow(QMainWindow):
         for app in apps:
             self.rows.addWidget(AppRow(app, self))
         self.library_title.setVisible(bool(apps))
+        free = core.human_size(core.free_space(self.paths.root))
+        self.space_label.setText(f"v{__version__}  ·  {free} free on internal storage")
 
     # ── install flow ─────────────────────────────────────────────────────
 

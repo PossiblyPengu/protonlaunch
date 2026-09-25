@@ -28,13 +28,27 @@ def make_lnk(target: str) -> bytes:
 
 FAKE_PROTON = """#!/bin/bash
 [ "$1" = run ] || exit 2
-[ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
 pfx="$STEAM_COMPAT_DATA_PATH/pfx"
 c="$pfx/drive_c"
-mkdir -p "$c/windows/system32" "$c/Program Files/Cool Game/bin" "$c/users/steamuser/Desktop" \\
+if [ "$2" = cmd.exe ]; then  # prefix setup, like real Proton: C: and Z: only
+  mkdir -p "$c/windows/system32" "$pfx/dosdevices"
+  ln -sfn ../drive_c "$pfx/dosdevices/c:"
+  ln -sfn / "$pfx/dosdevices/z:"
+  exit 0
+fi
+ls "$pfx/dosdevices" > "$STEAM_COMPAT_DATA_PATH/drives-during-install.txt"
+echo "$2" > "$STEAM_COMPAT_DATA_PATH/installer-arg.txt"
+[ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
+mkdir -p "$c/Program Files/Cool Game/bin" "$c/users/steamuser/Desktop" \\
          "$c/users/steamuser/AppData/Local/Temp"
 touch "$c/windows/system32/notepad.exe" "$c/users/steamuser/AppData/Local/Temp/setup-helper.exe"
 [ -n "$FAKE_NOTHING" ] && exit 0
+if [ -n "$FAKE_TO_D" ]; then  # user picked D:\\Games\\Cool Game in the installer
+  mkdir -p "$pfx/dosdevices/d:/Games/Cool Game"
+  head -c 3000000 /dev/zero > "$pfx/dosdevices/d:/Games/Cool Game/CoolGame.exe"
+  touch "$pfx/dosdevices/d:/Games/Cool Game/unins000.exe"
+  exit 0
+fi
 head -c 3000000 /dev/zero > "$c/Program Files/Cool Game/bin/CoolGame.exe"
 touch "$c/Program Files/Cool Game/unins000.exe" "$c/Program Files/Cool Game/bin/CrashReporter.exe"
 [ -n "$FAKE_LNK" ] && cp "$FAKE_LNK" "$c/users/steamuser/Desktop/Cool Game Deluxe.lnk"
@@ -61,6 +75,9 @@ class Env(unittest.TestCase):
         self.installer = self.tmp / "setup_cool_game_v1.2.3_(12345).exe"
         self.installer.write_bytes(b"MZ")
         self.env_backup = dict(os.environ)
+        self.home = self.tmp / "home"
+        (self.home / "Downloads").mkdir(parents=True)
+        os.environ["HOME"] = str(self.home)
 
     def tearDown(self):
         os.environ.clear()
@@ -268,7 +285,50 @@ class TestInstallFlow(Env):
 
     def test_msi_command(self):
         rt = core.Runtime("P", "proton", "/p/proton")
-        self.assertEqual(core.run_command(rt, Path("/d/a.msi")), ["/p/proton", "run", "msiexec", "/i", "/d/a.msi"])
+        self.assertEqual(core.run_command(rt, "D:\\a.msi"), ["/p/proton", "run", "msiexec", "/i", "D:\\a.msi"])
+
+    def test_installer_sees_home_as_d_and_no_rootfs(self):
+        inst = self.home / "Downloads" / self.installer.name
+        inst.write_bytes(b"MZ")
+        job = core.Installer(inst, self.paths, steam_roots_override=[self.steam])
+        pending = job.run()
+        job.close()
+        drives = (pending.compat_dir / "drives-during-install.txt").read_text().split()
+        self.assertIn("c:", drives)
+        self.assertIn("d:", drives)
+        self.assertNotIn("z:", drives)  # the full "rootfs" system drive is hidden while installing
+        arg = (pending.compat_dir / "installer-arg.txt").read_text().strip()
+        self.assertEqual(arg, "D:\\Downloads\\" + inst.name)
+        dd = pending.pfx / "dosdevices"
+        self.assertEqual(os.readlink(dd / "d:"), str(self.home.resolve()))
+        self.assertEqual(os.readlink(dd / "z:"), "/")  # restored for running the program
+
+    def test_installer_outside_home_gets_its_own_drive(self):
+        job = self.job()
+        pending = job.run()
+        job.close()
+        arg = (pending.compat_dir / "installer-arg.txt").read_text().strip()
+        self.assertEqual(arg, "E:\\" + self.installer.name)
+
+    def test_program_installed_to_d_is_found(self):
+        os.environ["FAKE_TO_D"] = "1"
+        job = self.job()
+        pending = job.run()
+        self.assertTrue(core.is_confident(pending.candidates, pending.installer))
+        top = pending.candidates[0]
+        self.assertEqual(top.exe.name, "CoolGame.exe")
+        app = job.finish(pending, top.exe)
+        self.assertEqual(app.exe, str(self.home.resolve() / "Games/Cool Game/CoolGame.exe"))
+
+    def test_cancel_restores_nothing_left_behind(self):
+        os.environ["FAKE_SLEEP"] = "30"
+        inst = self.home / "Downloads" / "x.exe"
+        inst.write_bytes(b"MZ")
+        job = core.Installer(inst, self.paths, steam_roots_override=[self.steam])
+        threading.Timer(1.0, job.cancel).start()
+        with self.assertRaises(core.Cancelled):
+            job.run()
+        self.assertEqual(list(self.paths.prefixes.iterdir()), [])
 
 
 if __name__ == "__main__":
