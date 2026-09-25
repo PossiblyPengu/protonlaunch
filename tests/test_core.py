@@ -593,6 +593,67 @@ class TestInstallFlow(Env):
         self.assertFalse(core.in_steam(app, [self.steam]))
         self.assertTrue(Path(app.prefix).exists())  # files are still there until uninstalled
 
+    def _fake_steam(self, behaves: bool) -> Path:
+        """A `steam` command that, like the real client, adds the .desktop file it's handed."""
+        bindir = self.tmp / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        script = bindir / "steam"
+        repo = Path(__file__).resolve().parents[1]
+        body = ("import sys, urllib.parse, re\n"
+                f"sys.path.insert(0, {str(repo)!r})\n"
+                "from pathlib import Path\n"
+                "from protonlaunch import core\n"
+                "url = sys.argv[1]\n"
+                "assert url.startswith('steam://addnonsteamgame/')\n"
+                "text = Path(urllib.parse.unquote(url.split('/', 3)[3])).read_text()\n"
+                "name = re.search('^Name=(.*)$', text, re.M).group(1)\n"
+                "exe = re.search('^Exec=\"(.*)\"$', text, re.M).group(1)\n"
+                f"core.add_steam_shortcut(name, exe, '/', roots=[Path({str(self.steam)!r})])\n")
+        script.write_text("#!/usr/bin/env python3\n" + (body if behaves else "pass\n"))
+        script.chmod(0o755)
+        os.environ["PATH"] = f"{bindir}:{os.environ['PATH']}"
+        return bindir
+
+    def _installed_app(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)  # Steam not running here: file edit
+        core.remove_steam_shortcut(app.steam_appid, [self.steam])
+        self.assertFalse(core.in_steam(app, [self.steam]))
+        return app
+
+    def test_add_to_running_steam_goes_through_steam(self):
+        app = self._installed_app()
+        self._fake_steam(behaves=True)
+        appid, how = core.add_to_steam(app, [self.steam], running=True, wait=5)
+        self.assertEqual(how, "live")
+        self.assertEqual(appid, core.find_shortcut(app.launcher, [self.steam]))
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        entry = core.desktop_entry_path(app).read_text()
+        self.assertIn(f'Exec="{app.launcher}"', entry)
+        self.assertIn("Categories=Game;", entry)
+
+    def test_running_steam_that_ignores_the_request_falls_back_to_the_file(self):
+        app = self._installed_app()
+        self._fake_steam(behaves=False)
+        appid, how = core.add_to_steam(app, [self.steam], running=True, wait=1)
+        self.assertEqual(how, "file")
+        self.assertTrue(core.in_steam(app, [self.steam]))
+
+    def test_steam_closed_edits_the_file(self):
+        app = self._installed_app()
+        appid, how = core.add_to_steam(app, [self.steam], running=False)
+        self.assertEqual((how, appid), ("file", core.find_shortcut(app.launcher, [self.steam])))
+
+    def test_finish_adds_menu_entry_and_uninstall_removes_it(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        self.assertEqual(app.steam_added, "file")
+        self.assertTrue(core.desktop_entry_path(app).exists())
+        core.uninstall(app, self.paths, roots=[self.steam])
+        self.assertFalse(core.desktop_entry_path(app).exists())
+
     def test_cancel_restores_nothing_left_behind(self):
         os.environ["FAKE_SLEEP"] = "30"
         inst = self.home / "Downloads" / "x.exe"

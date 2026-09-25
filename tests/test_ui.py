@@ -212,7 +212,7 @@ class TestWindow(Env):
         self.assertEqual(self.win.pick.heading.text(), "Nothing was installed")
         self.shot("6-pick-nothing")
         self.win.use_portable()
-        self.assertIs(self.win.stack.currentWidget(), self.win.done)
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
 
     def test_failure_is_explained(self):
         os.environ["FAKE_BROKEN"] = "1"
@@ -288,6 +288,21 @@ class TestWindow(Env):
         self.assertEqual(core.Library(self.paths).load(), [])
         self.assertIs(self.win.stack.currentWidget(), self.win.home)
         self.assertFalse(self.win.home.manage_btn.isVisible())
+
+    def test_add_back_to_steam_from_installed_programs(self):
+        inst = self.add_installer("Cool Game Setup.exe", 10)
+        self.win.start_install(inst)
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+        app = core.Library(self.paths).load()[0]
+        core.remove_steam_shortcut(app.steam_appid, [self.steam])  # e.g. Steam dropped it on restart
+        self.win.show_installed()
+        page = self.win.installed
+        self.assertIn("Not in Steam", page.list.item(0).text())
+        self.answers = [0]  # "Add to Steam"
+        page._activate(page.list.item(0))
+        self.assertEqual(self.asked[-1], "Cool Game")
+        self.wait_for(lambda: "In Steam" in page.list.item(0).text() and "Not in" not in page.list.item(0).text())
+        self.assertTrue(core.in_steam(core.Library(self.paths).load()[0], [self.steam]))
 
     def test_double_click_picks_once(self):
         from PyQt6.QtTest import QTest

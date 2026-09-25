@@ -738,6 +738,7 @@ class App:
     icon: str = ""  # PNG extracted from the program's .exe
     artwork: list[str] = field(default_factory=list)  # Steam library images we generated
     extra_dirs: list[str] = field(default_factory=list)  # program folder outside C: (installed to D:)
+    steam_added: str = ""  # how it got into Steam: "live" (Steam confirmed), "file", or "" (not added)
 
     @property
     def runtime(self) -> Runtime:
@@ -1182,13 +1183,10 @@ class Installer:
         app.extra_dirs = [str(d) for d in program_dirs(Path(app.exe), pending.new_dirs)]
         launcher = write_launcher(app, self.paths, self.steam_root, self._roots)
         app.launcher = str(launcher)
-        app.steam_appid, users = add_steam_shortcut(
-            app.name, str(launcher), str(Path(app.exe).parent), icon=icon, roots=self._roots
-        )
-        if not users:
-            app.steam_appid = 0
+        write_desktop_entry(app)
+        app.steam_appid, app.steam_added = add_to_steam(app, self._roots)
         self.library.upsert(app)
-        self._log(f"Installed '{app.name}' → {app.exe} (Steam users updated: {users})")
+        self._log(f"Installed '{app.name}' → {app.exe} (Steam: {app.steam_added or 'not added'})")
         self.close()
         return app
 
@@ -1287,19 +1285,120 @@ def app_size(app: App) -> int:
     return sum(dir_size(p) for p in app_paths(app))
 
 
-def in_steam(app: App, roots: Iterable[Path] | None = None) -> bool:
-    """Is the program's shortcut still in any Steam user's library?"""
-    if not app.steam_appid:
-        return False
+def find_shortcut(launcher: str, roots: Iterable[Path] | None = None, appid: int = 0) -> int:
+    """The appid of the Steam shortcut that runs `launcher` (or has `appid`), or 0 if there is none."""
     for cfg in steam_user_config_dirs(roots):
-        f = cfg / "shortcuts.vdf"
         try:
-            sc = vdf_loads(f.read_bytes()).get("shortcuts", {})
+            sc = vdf_loads((cfg / "shortcuts.vdf").read_bytes()).get("shortcuts", {})
         except (OSError, ValueError):
             continue
-        if any(_entry_appid(e) == app.steam_appid for e in sc.values() if isinstance(e, dict)):
-            return True
+        for e in sc.values():
+            if not isinstance(e, dict):
+                continue
+            aid = _entry_appid(e)
+            if (appid and aid == appid) or (launcher and launcher in str(e.get("Exe", ""))):
+                return aid
+    return 0
+
+
+def in_steam(app: App, roots: Iterable[Path] | None = None) -> bool:
+    """Is the program's shortcut in any Steam user's library?"""
+    return bool(find_shortcut(app.launcher, roots, app.steam_appid))
+
+
+# ── Adding to Steam ──────────────────────────────────────────────────────────
+#
+# Steam keeps its shortcuts in memory and writes shortcuts.vdf back when it exits, so editing the
+# file while Steam runs is undone by the next restart. While Steam is running we therefore ask
+# Steam itself to add the program (steam://addnonsteamgame/<.desktop file>, what SteamOS's own
+# "Add to Steam" does) and check that it landed; the file is only edited when Steam is closed, or
+# as a last resort.
+
+def desktop_entry_path(app: App) -> Path:
+    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    return base / "applications" / f"protonlaunch-{app.id}.desktop"
+
+
+def write_desktop_entry(app: App) -> Path:
+    """A menu entry (Desktop Mode app menu → Games). Also what Steam's add-a-game handoff reads."""
+    def esc(v: str) -> str:
+        return v.replace("\\", "\\\\").replace("\n", " ")
+
+    path = desktop_entry_path(app)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    launcher = app.launcher.replace('"', '\\"')
+    path.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={esc(' '.join(app.name.split()))}\n"
+        "Comment=Windows program installed with ProtonLaunch\n"
+        f'Exec="{launcher}"\n'
+        f"Path={esc(str(Path(app.exe).parent))}\n"
+        f"Icon={esc(app.icon or 'applications-games')}\n"
+        "Terminal=false\n"
+        "Categories=Game;\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def remove_desktop_entry(app: App) -> None:
+    try:
+        desktop_entry_path(app).unlink()
+    except OSError:
+        pass
+
+
+def request_steam_add(desktop_file: Path) -> bool:
+    """Hand a .desktop file to the running Steam client. True if the request was delivered."""
+    import urllib.parse
+
+    tmp = Path("/tmp") / desktop_file.name
+    try:
+        shutil.copy2(desktop_file, tmp)
+        Path("/tmp/addnonsteamgamefile").touch()  # SteamOS's add-to-steam sets this flag too
+    except OSError:
+        tmp = desktop_file
+    url = "steam://addnonsteamgame/" + urllib.parse.quote(str(tmp), safe="")
+    for cmd in (["steam", url], ["xdg-open", url]):
+        exe = shutil.which(cmd[0])
+        if not exe:
+            continue
+        try:
+            proc = subprocess.Popen([exe, *cmd[1:]], env=clean_env(), start_new_session=True,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        except OSError:
+            continue
+        try:
+            proc.wait(timeout=10)  # `steam <url>` just hands the URL to the running client and exits
+        except subprocess.TimeoutExpired:
+            pass
+        return True
     return False
+
+
+def add_to_steam(app: App, roots: Iterable[Path] | None = None, running: bool | None = None,
+                 wait: float = 12.0) -> tuple[int, str]:
+    """Add the program to Steam. Returns (appid, how): how is "live" when the running Steam
+    confirmed it, "file" when shortcuts.vdf was edited, "" when there's no Steam account."""
+    roots = list(steam_roots() if roots is None else roots)
+    if running is None:
+        running = steam_is_running()
+    if running and app.launcher:
+        entry = desktop_entry_path(app)
+        if not entry.exists():
+            entry = write_desktop_entry(app)
+        if request_steam_add(entry):
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                appid = find_shortcut(app.launcher, roots)
+                if appid:
+                    return appid, "live"
+                time.sleep(0.3)
+    appid, users = add_steam_shortcut(app.name, app.launcher, str(Path(app.exe).parent), icon=app.icon,
+                                      roots=roots)
+    return (appid, "file") if users else (0, "")
 
 
 def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None) -> None:
@@ -1307,6 +1406,7 @@ def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None) -> No
     its Steam shortcut, icon, artwork, launcher and log."""
     if app.steam_appid:
         remove_steam_shortcut(app.steam_appid, roots)
+    remove_desktop_entry(app)
     for d in safe_extra_dirs(app):
         shutil.rmtree(d, ignore_errors=True)
     shutil.rmtree(app.prefix, ignore_errors=True)

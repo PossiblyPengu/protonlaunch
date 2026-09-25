@@ -1,5 +1,5 @@
 {
-  "version": "2.3.0",
-  "sha256": "c8666d69b5d55c939906dffc2e084cae5b2509243286e318a119b3b70dc0e7de",
-  "notes": "Uninstall programs from ProtonLaunch (Installed programs)"
+  "version": "2.4.0",
+  "sha256": "5e5123b3c34ce490ae588044c91bb9e52ecf28a78b82b8b3580cd625cf863fc0",
+  "notes": "Games now reliably appear in Steam (added through Steam itself, no restart). Add to Steam from Installed programs. Desktop Mode menu entries."
 }

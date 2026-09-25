@@ -17,7 +17,8 @@ Built for the Deck: full controller support (D-pad/stick to move, **A** select, 
 - **Gives each program its own Windows setup (prefix)**, so one program can't break another.
 - **Shows your internal storage as D: in the installer.** Proton normally offers only C: and Z: ("rootfs", SteamOS's small read-only system partition), which makes installers complain about space. While installing, Z: is hidden and D: is your home folder. Z: comes back afterwards so the program runs normally.
 - **Finds the installed program** from the shortcuts its installer made, skipping uninstallers, redistributables and crash reporters. If it can't tell, it shows its best guesses with their icons.
-- **Adds it to Steam** for every Steam account on the Deck, using the program's own icon. It also generates library artwork (capsule, wide, hero and logo) so the program doesn't show up as a blank tile. Artwork you've added yourself (SteamGridDB, Decky…) is never overwritten.
+- **Adds it to Steam.** While Steam is running, ProtonLaunch asks Steam itself to add the program (the same hand-off SteamOS's own "Add to Steam" uses) and checks that it arrived — no restart needed. Editing Steam's shortcut file while Steam runs doesn't stick: Steam writes its own list back when it restarts. With Steam closed, the file is edited directly. The program's own icon is used, and library artwork is generated (capsule, wide, hero, logo) so it doesn't show up as a blank tile; artwork you added yourself (SteamGridDB, Decky…) is never overwritten.
+- **Adds it to the Desktop Mode app menu** (under Games), removed again on uninstall.
 - **Frees space afterwards:** one tap deletes the installer, including GOG-style `.bin` parts.
 - **Handles programs that need no install:** if the file *is* the program, it's added as-is.
 
@@ -48,9 +49,8 @@ No pip, pacman, or developer mode needed. The script downloads the prebuilt bina
 
 **Uninstalling:** Home → **Installed programs** (or ☰ Menu → Installed programs). Each program shows its size and
 whether it's still in Steam. Uninstalling deletes its Windows folder (including saves kept inside it), its folder on
-D: if it was installed there, and its Steam shortcut, icon and artwork. Programs you removed from Steam show up as
-"Removed from Steam" so their files can be cleaned up too. Installed programs don't appear in the Desktop Mode app
-menu or in Discover — only in Steam and here.
+D: if it was installed there, and its Steam shortcut, icon and artwork. A program that isn't in Steam (you removed it, or
+Steam dropped it) shows "Not in Steam" and offers **Add to Steam** — or uninstall to free the space.
 
 ## Command line
 

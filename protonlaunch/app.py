@@ -118,6 +118,24 @@ class InstallThread(QThread):
             self.failed.emit(str(e))
 
 
+class Worker(QThread):
+    """Runs fn(status) off the UI thread: adding to Steam can wait a few seconds for Steam."""
+
+    status = pyqtSignal(str)
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, fn: Callable[[Callable[[str], None]], object]):
+        super().__init__()
+        self.fn = fn
+
+    def run(self) -> None:
+        try:
+            self.done.emit(self.fn(self.status.emit))
+        except Exception as e:  # noqa: BLE001 — shown to the user
+            self.failed.emit(str(e) or type(e).__name__)
+
+
 class SizesThread(QThread):
     size = pyqtSignal(str, object)  # app id, bytes (object: sizes can exceed 32-bit int)
 
@@ -598,10 +616,15 @@ class DonePage(Page):
         self.app = app
         icon = artwork.load_icon(app.icon)
         self.art.setPixmap(pixmap(artwork.render("", app.name, icon), 460, 215))
-        if app.steam_appid:
+        if app.steam_added == "live":
             self.heading.setText(f"✓  {app.name} is in your Steam library")
-            msg = "Restart Steam to see it  (STEAM button → Power → Restart Steam)." \
-                if core.steam_is_running() else "It'll be there next time you open Steam."
+            msg = "It's there now — no restart needed."
+        elif app.steam_added == "file" and not core.steam_is_running():
+            self.heading.setText(f"✓  {app.name} is in your Steam library")
+            msg = "It'll be there next time you open Steam."
+        elif app.steam_added == "file":
+            self.heading.setText(f"✓  {app.name} is installed")
+            msg = steam_file_note()
         else:
             self.heading.setText(f"✓  {app.name} is installed")
             msg = "No Steam account was found on this Deck, so it couldn't be added to Steam."
@@ -640,6 +663,12 @@ class DonePage(Page):
         return [("A", "Select", self.win.nav_activate), ("B", "Done", self.back)]
 
 
+def steam_file_note() -> str:
+    return ("Steam didn't confirm the new shortcut, and Steam may undo it when it restarts. If it's missing: "
+            "in Desktop Mode, exit Steam (Steam menu → Exit), open ProtonLaunch from the app menu and use "
+            "Installed programs → Add to Steam.")
+
+
 class InstalledPage(Page):
     """What ProtonLaunch installed, to uninstall things. Deliberately not a launcher: no Play here."""
 
@@ -651,7 +680,8 @@ class InstalledPage(Page):
         lay.setContentsMargins(40, 22, 40, 20)
         lay.setSpacing(12)
         lay.addWidget(label("Installed programs", "h1"))
-        lay.addWidget(label("Pick a program to uninstall it. You play them from your Steam library.", "dim"))
+        lay.addWidget(label("Pick a program to uninstall it, or to add it back to Steam. You play them from "
+                            "your Steam library.", "dim"))
         self.list = QListWidget()
         self.list.setIconSize(self.list.iconSize() * 2.5)
         on_choose(self.list, self._activate)
@@ -686,7 +716,7 @@ class InstalledPage(Page):
 
     def _text(self, app: core.App) -> str:
         size = core.human_size(self.sizes[app.id]) if app.id in self.sizes else "…"
-        where = "In Steam" if core.in_steam(app) else "Removed from Steam — files still on disk"
+        where = "In Steam" if core.in_steam(app) else "Not in Steam"
         return f"{app.name}\nInstalled {ago(app.installed_at)}  ·  {size}  ·  {where}"
 
     def _on_size(self, app_id: str, size: int) -> None:
@@ -698,7 +728,16 @@ class InstalledPage(Page):
 
     def _activate(self, item: QListWidgetItem) -> None:
         app = self.apps.get(item.data(Qt.ItemDataRole.UserRole))
-        if app is not None:
+        if app is None:
+            return
+        if core.in_steam(app):
+            self.win.uninstall(app, self.sizes.get(app.id))
+            return
+        choice = Sheet.ask(self, app.name, "This program isn't in your Steam library.",
+                           ("Add to Steam", "Uninstall", "Cancel"))
+        if choice == 0:
+            self.win.add_to_steam(app)
+        elif choice == 1:
             self.win.uninstall(app, self.sizes.get(app.id))
 
     def enter(self) -> None:
@@ -706,7 +745,7 @@ class InstalledPage(Page):
         (self.list if self.list.isVisible() else self).setFocus()
 
     def hints(self):
-        return [("A", "Uninstall", self.win.nav_activate), ("B", "Back", self.back)]
+        return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
 
 
 class UpdatePage(Page):
@@ -801,6 +840,7 @@ class MainWindow(QMainWindow):
         self.update_dismissed = False
         self.update_check: UpdateCheckThread | None = None
         self.update_thread: UpdateDownloadThread | None = None
+        self.workers: set[QThread] = set()
 
         self.setWindowTitle("ProtonLaunch")
         self.resize(1280, 800)
@@ -1031,19 +1071,66 @@ class MainWindow(QMainWindow):
         pending, self.pending = self.pending, None
         if pending is None or self.job is None:
             return
-        self.progress.stop()
         icon_img = artwork.load_exe_icon(exe)
         icon_path = artwork.save_icon(icon_img, self.paths.icons / f"{pending.id}.png") if icon_img else ""
-        try:
-            app = self.job.finish(pending, exe, name, icon=icon_path)
-        except Exception as e:  # noqa: BLE001
-            Sheet.ask(self, "Couldn't finish", str(e), ("Close",))
+        job = self.job
+        if self.stack.currentWidget() is not self.progress:
+            self.go(self.progress)
+        self.progress.on_status("Adding to Steam…", "steam")
+
+        def run(status: Callable[[str], None]) -> core.App:
+            job.status, job._log_cb = status, lambda _line: None
+            return job.finish(pending, exe, name, icon=icon_path)
+
+        def finished(app: core.App) -> None:
+            self.progress.stop()
+            self._write_art(app, icon_img)
+            self.done.load(app)
+            self.go(self.done)
+
+        def failed(message: str) -> None:
+            self.progress.stop()
+            Sheet.ask(self, "Couldn't finish", message, ("Close",))
             self.go_home()
-            return
+
+        self.run_worker(run, finished, failed, status=lambda text: self.progress.on_status(text, "steam"))
+
+    def run_worker(self, fn, on_done, on_failed, status=None) -> None:
+        w = Worker(fn)
+        w.done.connect(on_done)
+        w.failed.connect(on_failed)
+        if status:
+            w.status.connect(status)
+        w.finished.connect(w.deleteLater)
+        w.finished.connect(lambda: self.workers.discard(w))
+        self.workers.add(w)
+        w.start()
+
+    def _write_art(self, app: core.App, icon_img: QImage | None) -> None:
+        artwork.remove_files(app.artwork)
         app.artwork = artwork.write_steam_artwork(app.steam_appid, app.name, icon_img, core.steam_grid_dirs())
         self.library.upsert(app)
-        self.done.load(app)
-        self.go(self.done)
+
+    def add_to_steam(self, app: core.App) -> None:
+        """Put an installed program (back) into Steam — e.g. if a Steam restart dropped it."""
+        self.flash(f"Adding {app.name} to Steam…")
+
+        def run(_status) -> core.App:
+            app.steam_appid, app.steam_added = core.add_to_steam(app)
+            return app
+
+        def finished(a: core.App) -> None:
+            self._write_art(a, artwork.load_icon(a.icon))
+            if a.steam_added == "live":
+                self.flash(f"{a.name} is in your Steam library")
+            elif a.steam_added == "file":
+                Sheet.ask(self, "Almost there", steam_file_note(), ("Close",))
+            else:
+                Sheet.ask(self, "Couldn't add to Steam", "No Steam account was found on this Deck.", ("Close",))
+            if self.stack.currentWidget() is self.installed:
+                self.installed.enter()
+
+        self.run_worker(run, finished, lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)))
 
     def refresh_launchers(self) -> None:
         """Rewrite launch scripts so programs installed by older versions get current fixes."""
@@ -1104,7 +1191,7 @@ class MainWindow(QMainWindow):
         if size:
             msg += f" — freed {core.human_size(size)}"
         if app.steam_appid and core.steam_is_running():
-            msg += ". Restart Steam to update your library."
+            msg += ". If it's still listed in Steam, remove it there too."
         self.flash(msg)
         self.refresh_space()
         if self.library.load():
