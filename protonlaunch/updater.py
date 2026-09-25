@@ -23,7 +23,8 @@ from typing import Callable
 REPO = "PossiblyPengu/protonlaunch"
 BRANCHES = ("main", "claude/steam-deck-windows-install-mkeivr")
 ASSET = "protonlaunch-linux-x86_64"
-RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+API = f"https://api.github.com/repos/{REPO}"
+RELEASE_API = f"{API}/releases/latest"
 RAW = f"https://raw.githubusercontent.com/{REPO}"
 USER_AGENT = "ProtonLaunch-updater"
 
@@ -68,8 +69,9 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def _open(url: str, timeout: float):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
+def _open(url: str, timeout: float, headers: dict[str, str] | None = None):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache",
+                                               **(headers or {})})
     ctx = _ssl_context() if url.startswith("https:") else None
     try:
         return urllib.request.urlopen(req, timeout=timeout, context=ctx)
@@ -78,8 +80,8 @@ def _open(url: str, timeout: float):
         raise UpdateError(f"HTTP {e.code} for {url.split('?')[0]}") from None
 
 
-def fetch(url: str, timeout: float = 8.0, limit: int = 1 << 20) -> bytes:
-    with _open(url, timeout) as r:
+def fetch(url: str, timeout: float = 8.0, limit: int = 1 << 20, headers: dict[str, str] | None = None) -> bytes:
+    with _open(url, timeout, headers) as r:
         return r.read(limit)
 
 
@@ -110,11 +112,29 @@ def from_manifest(base_url: str) -> Update | None:
                   str(data.get("notes", ""))[:600], base_url)
 
 
+def from_branch(branch: str, api: str = API, raw: str = RAW) -> Update | None:
+    """bin/latest.json on a branch, read at the branch's current commit.
+
+    raw.githubusercontent caches what a branch name points to for several minutes (query strings
+    don't help), so a fresh release could show up stale or with a mismatched binary. Asking the
+    API for the branch's commit and reading files by commit id is never stale. If the API is
+    unavailable (e.g. rate-limited), the branch name is used as before.
+    """
+    base = f"{raw}/{branch}/bin"
+    try:
+        sha = fetch(f"{api}/commits/{branch}", headers={"Accept": "application/vnd.github.sha"}).decode().strip()
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            base = f"{raw}/{sha}/bin"
+    except Exception:  # noqa: BLE001 — fall back to the branch name
+        pass
+    return from_manifest(base)
+
+
 def default_sources() -> list[Callable[[], Update | None]]:
     override = os.environ.get("PROTONLAUNCH_UPDATE_BASE")  # for testing: a folder URL with latest.json
     if override:
         return [lambda: from_manifest(override.rstrip("/"))]
-    return [from_release] + [lambda b=b: from_manifest(f"{RAW}/{b}/bin") for b in BRANCHES]
+    return [from_release] + [lambda b=b: from_branch(b) for b in BRANCHES]
 
 
 def check(current: str, sources: list[Callable[[], Update | None]] | None = None,
