@@ -98,9 +98,10 @@ class InstallThread(QThread):
     failed = pyqtSignal(str)
     cancelled = pyqtSignal()
 
-    def __init__(self, installer: Path, paths: core.Paths):
+    def __init__(self, installer: Path, paths: core.Paths, allow_no_container: bool = False):
         super().__init__()
-        self.job = core.Installer(installer, paths, status=self.status.emit, log=self.log.emit)
+        self.job = core.Installer(installer, paths, status=self.status.emit, log=self.log.emit,
+                                  allow_no_container=allow_no_container)
 
     def run(self) -> None:
         try:
@@ -135,6 +136,7 @@ class MainWindow(QMainWindow):
         self.library = core.Library(self.paths)
         self.thread: InstallThread | None = None
         self.job: core.Installer | None = None
+        self.current_installer: Path | None = None
         self.pending: core.PendingInstall | None = None
         self.last_app: core.App | None = None
 
@@ -147,8 +149,19 @@ class MainWindow(QMainWindow):
         self._build_progress()
         self._build_pick()
         self._build_done()
+        self.refresh_launchers()
         self.refresh_library()
         self.show_page(self.home)
+
+    def refresh_launchers(self) -> None:
+        """Rewrite launch scripts so programs installed by older versions get current fixes."""
+        roots = core.steam_roots()
+        for app in self.library.load():
+            if app.launcher and Path(app.prefix).is_dir():
+                try:
+                    core.write_launcher(app, self.paths, roots[0] if roots else None, roots)
+                except OSError:
+                    pass
 
     # ── pages ────────────────────────────────────────────────────────────
 
@@ -288,17 +301,18 @@ class MainWindow(QMainWindow):
         if path:
             self.start_install(path)
 
-    def start_install(self, installer: Path) -> None:
+    def start_install(self, installer: Path, allow_no_container: bool = False) -> None:
         if self.thread is not None:
             return
         installer = Path(installer)
+        self.current_installer = installer
         self.progress_title.setText(f"Installing {core.guess_name(installer)}")
         self.status.setText("Getting ready…")
         self.log_view.clear()
         self.continue_btn.hide()
         self.cancel_btn.setEnabled(True)
         self.show_page(self.progress)
-        t = InstallThread(installer, self.paths)
+        t = InstallThread(installer, self.paths, allow_no_container)
         t.status.connect(self.on_status)
         t.log.connect(self.log_view.appendPlainText)
         t.done.connect(self.on_installed)
@@ -354,6 +368,23 @@ class MainWindow(QMainWindow):
             box.exec()
             if box.clickedButton() is install:
                 QDesktopServices.openUrl(QUrl(f"steam://install/{core.PROTON_EXPERIMENTAL_APPID}"))
+            return
+        if message.startswith("NO_CONTAINER:"):
+            appid = message.split(":", 1)[1]
+            box = QMessageBox(self)
+            box.setWindowTitle("One more Steam download needed")
+            box.setText("Proton runs inside the “Steam Linux Runtime”, which isn't installed yet. "
+                        "Without it, installers often can't download anything.\n\n"
+                        "Tap “Install it” and Steam will download it (a few hundred MB). "
+                        "When it finishes, install your program again.")
+            install = box.addButton("Install it", QMessageBox.ButtonRole.AcceptRole)
+            anyway = box.addButton("Continue without it", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            if box.clickedButton() is install:
+                QDesktopServices.openUrl(QUrl(f"steam://install/{appid}"))
+            elif box.clickedButton() is anyway:
+                self.start_install(self.current_installer, allow_no_container=True)
             return
         QMessageBox.warning(self, "Install failed", message)
 

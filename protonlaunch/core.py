@@ -193,6 +193,49 @@ def find_runtimes(
 # Steam app id of "Proton Experimental" — used to offer a one-tap install.
 PROTON_EXPERIMENTAL_APPID = 1493710
 
+# Steam never runs Proton directly: it runs it inside the Steam Linux Runtime container named by
+# the tool's toolmanifest.vdf. The container supplies libraries (e.g. 32-bit TLS/gnutls) that
+# SteamOS itself may lack; without them installers can fail to download ("no connection").
+_RUNTIME_DIR_NAMES = {
+    1628350: "SteamLinuxRuntime_sniper",
+    1391110: "SteamLinuxRuntime_soldier",
+}
+
+
+def required_container_appid(proton_script: Path) -> int | None:
+    try:
+        text = (Path(proton_script).parent / "toolmanifest.vdf").read_text(errors="replace")
+    except OSError:
+        return None
+    m = re.search(r'"require_tool_appid"\s+"(\d+)"', text)
+    return int(m.group(1)) if m else None
+
+
+def container_entry_point(proton_script: Path, roots: Iterable[Path] | None = None) -> Path | None:
+    """The Steam Linux Runtime entry point Steam would run this Proton in, if installed."""
+    if os.environ.get("PROTONLAUNCH_NO_CONTAINER"):
+        return None
+    appid = required_container_appid(proton_script)
+    if appid is None:
+        return None
+    for root in steam_roots() if roots is None else roots:
+        for lib in steam_library_dirs(root):
+            names: list[str] = []
+            try:
+                acf = (lib / f"steamapps/appmanifest_{appid}.acf").read_text(errors="replace")
+                m = re.search(r'"installdir"\s+"([^"]+)"', acf)
+                if m:
+                    names.append(m.group(1))
+            except OSError:
+                pass
+            if appid in _RUNTIME_DIR_NAMES:
+                names.append(_RUNTIME_DIR_NAMES[appid])
+            for name in names:
+                ep = lib / "steamapps/common" / name / "_v2-entry-point"
+                if ep.is_file() and os.access(ep, os.X_OK):
+                    return ep
+    return None
+
 
 # ── Naming ───────────────────────────────────────────────────────────────────
 
@@ -715,21 +758,39 @@ class Library:
 # ── Running things ───────────────────────────────────────────────────────────
 
 
-def runtime_env(rt: Runtime, compat_dir: Path, steam_root: Path | None) -> dict[str, str]:
+def runtime_env(
+    rt: Runtime,
+    compat_dir: Path,
+    steam_root: Path | None,
+    mounts: Iterable[Path] = (),
+) -> dict[str, str]:
     env = clean_env()
     env["WINEPREFIX"] = str(compat_dir / "pfx")
     env.setdefault("WINEDEBUG", "-all")
     if rt.is_proton:
         env["STEAM_COMPAT_DATA_PATH"] = str(compat_dir)
         env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(steam_root or Path.home() / ".steam/steam")
+        # Make Proton itself and anything outside the home folder visible inside the container.
+        env["STEAM_COMPAT_TOOL_PATHS"] = str(Path(rt.path).parent)
+        extra = [str(m) for m in mounts]
+        if extra:
+            env["STEAM_COMPAT_MOUNTS"] = ":".join(extra)
     return env
 
 
-def run_command(rt: Runtime, target: str | Path, *extra: str) -> list[str]:
-    """Command line that runs a Windows .exe/.msi (unix or Windows path) under the runtime."""
+def run_command(rt: Runtime, target: str | Path, *extra: str, entry: Path | None = None) -> list[str]:
+    """Command line that runs a Windows .exe/.msi (unix or Windows path) under the runtime.
+
+    With `entry` (a Steam Linux Runtime entry point) Proton runs inside the container, exactly
+    as Steam launches games.
+    """
     target = str(target)
     args = ["msiexec", "/i", target] if target.lower().endswith(".msi") else [target, *extra]
-    return [rt.path, "run", *args] if rt.is_proton else [rt.path, *args]
+    if not rt.is_proton:
+        return [rt.path, *args]
+    if entry is not None:
+        return [str(entry), "--verb=waitforexitandrun", "--", rt.path, "waitforexitandrun", *args]
+    return [rt.path, "run", *args]
 
 
 # ── Drive letters ────────────────────────────────────────────────────────────
@@ -799,8 +860,14 @@ def human_size(n: int) -> str:
     return f"{n} B"
 
 
-def write_launcher(app: App, paths: Paths, steam_root: Path | None) -> Path:
-    """A shell script Steam can run directly. It re-finds Proton if the saved one was removed."""
+def write_launcher(
+    app: App,
+    paths: Paths,
+    steam_root: Path | None,
+    roots: Iterable[Path] | None = None,
+) -> Path:
+    """A shell script Steam can run directly. It re-finds Proton if the saved one was removed,
+    and runs it inside the Steam Linux Runtime like Steam does (plain Proton if that's missing)."""
     paths.launchers.mkdir(parents=True, exist_ok=True)
     script = paths.launchers / f"{app.id}.sh"
     compat = Path(app.prefix)
@@ -813,6 +880,7 @@ def write_launcher(app: App, paths: Paths, steam_root: Path | None) -> Path:
     ]
     if app.runtime_kind == "proton":
         client = str(steam_root or Path.home() / ".steam/steam")
+        entry = container_entry_point(Path(app.runtime_path), roots)
         lines += [
             f"export STEAM_COMPAT_DATA_PATH={q(str(compat))}",
             f"export STEAM_COMPAT_CLIENT_INSTALL_PATH={q(client)}",
@@ -822,6 +890,11 @@ def write_launcher(app: App, paths: Paths, steam_root: Path | None) -> Path:
             '  PROTON=$(ls -d "$HOME"/.steam/root/compatibilitytools.d/*/proton '
             '"$HOME"/.local/share/Steam/compatibilitytools.d/*/proton '
             '"$HOME"/.local/share/Steam/steamapps/common/Proton*/proton 2>/dev/null | sort -V | tail -n 1)',
+            "fi",
+            'export STEAM_COMPAT_TOOL_PATHS="$(dirname "$PROTON")"',
+            f"ENTRY={q(str(entry or ''))}",
+            'if [ -n "$ENTRY" ] && [ -x "$ENTRY" ] && [ -z "$PROTONLAUNCH_NO_CONTAINER" ]; then',
+            f'  exec "$ENTRY" --verb=waitforexitandrun -- "$PROTON" waitforexitandrun {q(app.exe)} "$@"',
             "fi",
             f'exec "$PROTON" run {q(app.exe)} "$@"',
         ]
@@ -869,10 +942,13 @@ class Installer:
         status: Callable[[str], None] = lambda s: None,
         log: Callable[[str], None] = lambda s: None,
         steam_roots_override: list[Path] | None = None,
+        allow_no_container: bool = False,
     ):
         self.installer = Path(installer).expanduser().resolve()
         self.paths = paths or Paths.default()
         self.home = Path.home().resolve()
+        self.entry: Path | None = None
+        self.allow_no_container = allow_no_container
         self.library = Library(self.paths)
         self._roots = steam_roots() if steam_roots_override is None else steam_roots_override
         self.steam_root = steam_root or (self._roots[0] if self._roots else None)
@@ -958,6 +1034,11 @@ class Installer:
                 raise InstallError("NO_RUNTIME")
             self.runtime = runtimes[0]
 
+        if self.runtime.is_proton and not self.allow_no_container:
+            need = required_container_appid(Path(self.runtime.path))
+            if need and container_entry_point(Path(self.runtime.path), self._roots) is None:
+                raise InstallError(f"NO_CONTAINER:{need}")
+
         name = guess_name(self.installer)
         app_id = self.library.unique_id(name)
         compat = self.paths.prefixes / app_id
@@ -965,9 +1046,16 @@ class Installer:
         self.paths.logs.mkdir(parents=True, exist_ok=True)
         log_file = self.paths.logs / f"{app_id}.log"
         self._log_fh = open(log_file, "w", encoding="utf-8")
-        self._env = runtime_env(self.runtime, compat, self.steam_root)
+        mounts = [p for p in (self.installer.parent, self.paths.root) if not p.is_relative_to(self.home)]
+        self._env = runtime_env(self.runtime, compat, self.steam_root, mounts)
+        self.entry = container_entry_point(Path(self.runtime.path), self._roots) if self.runtime.is_proton else None
         self._log(f"ProtonLaunch: installing {self.installer.name} as '{name}'")
         self._log(f"Runtime: {self.runtime.name} ({self.runtime.path})")
+        if self.entry:
+            self._log(f"Container: {self.entry.parent.name} (same as Steam)")
+        elif self.runtime.is_proton and required_container_appid(Path(self.runtime.path)):
+            self._log("Warning: the Steam Linux Runtime this Proton needs isn't installed; running "
+                      "Proton directly. Downloads inside installers may fail.")
 
         pfx = compat / "pfx"
         hidden_z: str | None = None
@@ -975,7 +1063,7 @@ class Installer:
         try:
             # 1. Create the Windows environment first, so its drives can be adjusted.
             self._set("prepare", "Setting up Windows… (takes a minute the first time)")
-            self._stream(run_command(self.runtime, "cmd.exe", "/c", "exit"))
+            self._stream(run_command(self.runtime, "cmd.exe", "/c", "exit", entry=self.entry))
             if ws:
                 self._stream([ws, "-w"])
             if self._cancelled:
@@ -997,7 +1085,7 @@ class Installer:
             # 3. Run the installer.
             self._set("installer", "Running the installer — follow the steps on screen.\n"
                       f"Install to C: or D: (both have {human_size(free_space(home))} free).")
-            rc = self._stream(run_command(self.runtime, target))
+            rc = self._stream(run_command(self.runtime, target, entry=self.entry))
             self._log(f"Installer exited with code {rc}")
             if self._cancelled:
                 raise Cancelled()
@@ -1047,7 +1135,7 @@ class Installer:
             runtime_kind=pending.runtime.kind,
             runtime_path=pending.runtime.path,
         )
-        launcher = write_launcher(app, self.paths, self.steam_root)
+        launcher = write_launcher(app, self.paths, self.steam_root, self._roots)
         app.launcher = str(launcher)
         app.steam_appid, users = add_steam_shortcut(
             app.name, str(launcher), str(Path(app.exe).parent), roots=self._roots

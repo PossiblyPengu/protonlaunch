@@ -27,7 +27,7 @@ def make_lnk(target: str) -> bytes:
 
 
 FAKE_PROTON = """#!/bin/bash
-[ "$1" = run ] || exit 2
+[ "$1" = run ] || [ "$1" = waitforexitandrun ] || exit 2
 pfx="$STEAM_COMPAT_DATA_PATH/pfx"
 c="$pfx/drive_c"
 if [ "$2" = cmd.exe ]; then  # prefix setup, like real Proton: C: and Z: only
@@ -58,6 +58,7 @@ echo "installed $2"
 
 class Env(unittest.TestCase):
     def setUp(self):
+        self.env_backup = dict(os.environ)
         self.tmp = Path(tempfile.mkdtemp())
         self.paths = core.Paths(self.tmp / "data")
         # Fake Steam with one user and one Proton
@@ -69,13 +70,27 @@ class Env(unittest.TestCase):
         self.proton = proton_dir / "proton"
         self.proton.write_text(FAKE_PROTON)
         self.proton.chmod(0o755)
+        # Steam Linux Runtime (sniper) that this Proton requires, like the real ones
+        (proton_dir / "toolmanifest.vdf").write_text(
+            '"manifest"\n{\n  "commandline" "/proton %verb%"\n  "require_tool_appid" "1628350"\n}\n')
+        sniper = self.steam / "steamapps/common/SteamLinuxRuntime_sniper"
+        sniper.mkdir(parents=True)
+        (self.steam / "steamapps/appmanifest_1628350.acf").write_text(
+            '"AppState"\n{\n  "appid" "1628350"\n  "installdir" "SteamLinuxRuntime_sniper"\n}\n')
+        self.entry_log = self.tmp / "entry.log"
+        self.entry = sniper / "_v2-entry-point"
+        self.entry.write_text('#!/bin/bash\necho "$@" >> "$FAKE_ENTRY_LOG"\n'
+                              '[ "$1" = --verb=waitforexitandrun ] && [ "$2" = -- ] || exit 3\n'
+                              'shift 2\nexec "$@"\n')
+        self.entry.chmod(0o755)
+        os.environ["FAKE_ENTRY_LOG"] = str(self.entry_log)
         ws = proton_dir / "files/bin/wineserver"
         ws.write_text("#!/bin/bash\nexit 0\n")
         ws.chmod(0o755)
         self.installer = self.tmp / "setup_cool_game_v1.2.3_(12345).exe"
         self.installer.write_bytes(b"MZ")
-        self.env_backup = dict(os.environ)
         self.home = self.tmp / "home"
+        os.environ.pop("PROTONLAUNCH_NO_CONTAINER", None)
         (self.home / "Downloads").mkdir(parents=True)
         os.environ["HOME"] = str(self.home)
 
@@ -283,9 +298,44 @@ class TestInstallFlow(Env):
         with self.assertRaises(core.InstallError):
             core.Installer(bad, self.paths, steam_roots_override=[self.steam]).run()
 
+    def test_runs_inside_steam_linux_runtime_like_steam(self):
+        job = self.job()
+        pending = job.run()
+        job.close()
+        self.assertEqual(job.entry, self.entry)
+        calls = self.entry_log.read_text().splitlines()
+        self.assertEqual(len(calls), 2)  # Windows setup, then the installer
+        for c in calls:
+            self.assertTrue(c.startswith(f"--verb=waitforexitandrun -- {self.proton} waitforexitandrun "))
+        self.assertIn("cmd.exe /c exit", calls[0])
+        self.assertTrue(calls[1].endswith(self.installer.name))
+        app = job.finish(pending, pending.candidates[0].exe)
+        script = Path(app.launcher).read_text()
+        self.assertIn(f"ENTRY={self.entry}", script)
+        self.assertIn('"$ENTRY" --verb=waitforexitandrun -- "$PROTON" waitforexitandrun', script)
+
+    def test_asks_when_container_missing(self):
+        self.entry.unlink()
+        with self.assertRaises(core.InstallError) as ctx:
+            self.job().run()
+        self.assertEqual(str(ctx.exception), "NO_CONTAINER:1628350")
+        self.assertFalse(self.paths.prefixes.exists() and any(self.paths.prefixes.iterdir()))
+
+    def test_falls_back_to_plain_proton_without_container(self):
+        self.entry.unlink()
+        job = self.job(allow_no_container=True)
+        job.run()
+        job.close()
+        self.assertIsNone(job.entry)
+        self.assertFalse(self.entry_log.exists())
+        self.assertIn("Warning: the Steam Linux Runtime", (self.paths.logs / "cool-game.log").read_text())
+
     def test_msi_command(self):
         rt = core.Runtime("P", "proton", "/p/proton")
         self.assertEqual(core.run_command(rt, "D:\\a.msi"), ["/p/proton", "run", "msiexec", "/i", "D:\\a.msi"])
+        self.assertEqual(core.run_command(rt, "x.exe", entry=Path("/e/_v2-entry-point")),
+                         ["/e/_v2-entry-point", "--verb=waitforexitandrun", "--", "/p/proton",
+                          "waitforexitandrun", "x.exe"])
 
     def test_installer_sees_home_as_d_and_no_rootfs(self):
         inst = self.home / "Downloads" / self.installer.name
