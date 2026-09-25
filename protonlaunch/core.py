@@ -737,6 +737,7 @@ class App:
     installer: str = ""  # the setup file it was installed from
     icon: str = ""  # PNG extracted from the program's .exe
     artwork: list[str] = field(default_factory=list)  # Steam library images we generated
+    extra_dirs: list[str] = field(default_factory=list)  # program folder outside C: (installed to D:)
 
     @property
     def runtime(self) -> Runtime:
@@ -954,6 +955,7 @@ class PendingInstall:
     runtime: Runtime
     candidates: list[Candidate]
     log_file: Path
+    new_dirs: list[Path] = field(default_factory=list)  # folders the installer created in home (D:)
 
     @property
     def pfx(self) -> Path:
@@ -1141,7 +1143,7 @@ class Installer:
                 self._log("New folders outside C: " + ", ".join(map(str, extra)))
             cands = find_program(pfx, name, self.installer, extra)
             self._log("Candidates: " + ", ".join(f"{c.exe.name}={c.score:.0f}" for c in cands[:8]))
-            return PendingInstall(app_id, name, self.installer, compat, self.runtime, cands, log_file)
+            return PendingInstall(app_id, name, self.installer, compat, self.runtime, cands, log_file, extra)
         except Cancelled:
             self._log("Cancelled.")
             self.close()
@@ -1177,6 +1179,7 @@ class Installer:
             installer=str(pending.installer),
             icon=icon,
         )
+        app.extra_dirs = [str(d) for d in program_dirs(Path(app.exe), pending.new_dirs)]
         launcher = write_launcher(app, self.paths, self.steam_root, self._roots)
         app.launcher = str(launcher)
         app.steam_appid, users = add_steam_shortcut(
@@ -1219,9 +1222,93 @@ def launch(app: App) -> subprocess.Popen:
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def program_dirs(exe: Path, new_dirs: Iterable[Path], home: Path | None = None) -> list[Path]:
+    """The folder a program was installed into outside its prefix (on D:), for uninstalling.
+
+    Only a new folder that holds the program counts. If the installer created a general-purpose
+    folder such as ~/Games, the program's own subfolder (~/Games/Cool Game) is used instead.
+    """
+    home = (home or Path.home()).resolve()
+    out = []
+    for d in new_dirs:
+        top = d.resolve()
+        if not exe.is_relative_to(top):
+            continue
+        if top.parent == home and top.name.lower() in _PROTECTED_HOME_DIRS:
+            rel = exe.relative_to(top).parts
+            if len(rel) < 2:
+                continue  # the program sits directly in ~/Games: no folder of its own to remove
+            top = top / rel[0]
+        out.append(top)
+    return out
+
+
+_PROTECTED_HOME_DIRS = {"downloads", "desktop", "documents", "music", "pictures", "videos", "games",
+                        ".local", ".steam", ".config", ".var", "steam"}
+
+
+def safe_extra_dirs(app: App, home: Path | None = None) -> list[Path]:
+    """The program folders outside its prefix that uninstall may delete: existing, inside the home
+    folder, and never the home folder itself or a standard folder like Downloads."""
+    home = (home or Path.home()).resolve()
+    out = []
+    for d in app.extra_dirs:
+        p = Path(d)
+        try:
+            r = p.resolve()
+        except OSError:
+            continue
+        if (r.is_dir() and r.is_relative_to(home) and r != home
+                and not (r.parent == home and r.name.lower() in _PROTECTED_HOME_DIRS)):
+            out.append(r)
+    return out
+
+
+def app_paths(app: App) -> list[Path]:
+    """Everything on disk that belongs to an installed program."""
+    return [p for p in [Path(app.prefix), *safe_extra_dirs(app)] if p.exists()]
+
+
+def dir_size(path: Path, limit: int = 500_000) -> int:
+    total, n = 0, 0
+    for dirpath, _dirs, files in os.walk(path):
+        for f in files:
+            n += 1
+            if n > limit:
+                return total
+            try:
+                total += os.lstat(os.path.join(dirpath, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def app_size(app: App) -> int:
+    return sum(dir_size(p) for p in app_paths(app))
+
+
+def in_steam(app: App, roots: Iterable[Path] | None = None) -> bool:
+    """Is the program's shortcut still in any Steam user's library?"""
+    if not app.steam_appid:
+        return False
+    for cfg in steam_user_config_dirs(roots):
+        f = cfg / "shortcuts.vdf"
+        try:
+            sc = vdf_loads(f.read_bytes()).get("shortcuts", {})
+        except (OSError, ValueError):
+            continue
+        if any(_entry_appid(e) == app.steam_appid for e in sc.values() if isinstance(e, dict)):
+            return True
+    return False
+
+
 def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None) -> None:
+    """Remove the program's files (prefix, plus its folder on D: if it was installed there),
+    its Steam shortcut, icon, artwork, launcher and log."""
     if app.steam_appid:
         remove_steam_shortcut(app.steam_appid, roots)
+    for d in safe_extra_dirs(app):
+        shutil.rmtree(d, ignore_errors=True)
     shutil.rmtree(app.prefix, ignore_errors=True)
     files = [Path(app.launcher), paths.logs / f"{app.id}.log", *map(Path, app.artwork)]
     if app.icon:

@@ -46,7 +46,11 @@ No pip, pacman, or developer mode needed. The script downloads the prebuilt bina
 | Install logs | `~/.local/share/protonlaunch/logs/` |
 | Backup of your Steam shortcuts | `…/userdata/<id>/config/shortcuts.vdf.protonlaunch-bak` |
 
-To uninstall a program, remove its shortcut in Steam and delete its folder under `~/.local/share/protonlaunch/prefixes/`.
+**Uninstalling:** Home → **Installed programs** (or ☰ Menu → Installed programs). Each program shows its size and
+whether it's still in Steam. Uninstalling deletes its Windows folder (including saves kept inside it), its folder on
+D: if it was installed there, and its Steam shortcut, icon and artwork. Programs you removed from Steam show up as
+"Removed from Steam" so their files can be cleaned up too. Installed programs don't appear in the Desktop Mode app
+menu or in Discover — only in Steam and here.
 
 ## Command line
 

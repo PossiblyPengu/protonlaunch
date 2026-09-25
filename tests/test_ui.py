@@ -261,6 +261,50 @@ class TestWindow(Env):
             del os.environ["PROTONLAUNCH_UPDATE_BASE"]
             server.close()
 
+    def test_uninstall_from_installed_programs(self):
+        os.environ["FAKE_TO_D"] = "1"
+        inst = self.add_installer("Cool Game Setup.exe", 10)
+        self.win.start_install(inst)
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+        self.win.go_home()
+        self.assertTrue(self.win.home.manage_btn.isVisible())
+        self.assertIn("(1)", self.win.home.manage_btn.text())
+        self.win.home.manage_btn.click()
+        page = self.win.installed
+        self.assertIs(self.win.stack.currentWidget(), page)
+        self.assertEqual(page.list.count(), 1)
+        self.wait_for(lambda: "MB" in page.list.item(0).text())  # size filled in from a background thread
+        self.assertIn("In Steam", page.list.item(0).text())
+        self.shot("10-installed", self.win)
+        app = core.Library(self.paths).load()[0]
+        self.answers = [1]  # Keep
+        page._activate(page.list.item(0))
+        self.assertTrue(Path(app.prefix).exists())
+        self.answers = [0]  # Uninstall
+        page._activate(page.list.item(0))
+        self.assertIn("Uninstall Cool Game?", self.asked)
+        self.assertFalse(Path(app.prefix).exists())
+        self.assertFalse(Path(app.extra_dirs[0]).exists())
+        self.assertEqual(core.Library(self.paths).load(), [])
+        self.assertIs(self.win.stack.currentWidget(), self.win.home)
+        self.assertFalse(self.win.home.manage_btn.isVisible())
+
+    def test_double_click_picks_once(self):
+        from PyQt6.QtTest import QTest
+        sub = self.downloads / "Folder"
+        sub.mkdir()
+        (sub / "inner").mkdir()
+        self.win.browse_installers()
+        lst = self.win.browser.list
+        r = lst.visualItemRect(lst.item(0)).center()
+        b, v = Qt.MouseButton.LeftButton, lst.viewport()
+        QTest.mousePress(v, b, pos=r)
+        QTest.mouseRelease(v, b, pos=r)  # click: opens "Folder"
+        QTest.mouseDClick(v, b, pos=r)   # the double-click lands on "Up one folder" now
+        QTest.mouseRelease(v, b, pos=r)
+        self.pump()
+        self.assertEqual(self.win.browser.cwd, sub)  # not bounced back up (or into "inner")
+
     def test_sheet_screenshot(self):
         if not self.shots:
             self.skipTest("screenshots only")

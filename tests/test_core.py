@@ -548,6 +548,51 @@ class TestInstallFlow(Env):
         app = job.finish(pending, top.exe)
         self.assertEqual(app.exe, str(self.home.resolve() / "Games/Cool Game/CoolGame.exe"))
 
+    def test_uninstall_program_installed_to_d(self):
+        os.environ["FAKE_TO_D"] = "1"
+        (self.home / "Games").mkdir()  # a standard folder the installer puts things into
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        game_dir = (self.home / "Games" / "Cool Game").resolve()
+        self.assertEqual(app.extra_dirs, [str(game_dir)])
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        self.assertGreater(core.app_size(app), 3_000_000)
+        core.uninstall(app, self.paths, roots=[self.steam])
+        self.assertFalse(game_dir.exists())
+        self.assertTrue((self.home / "Games").exists())  # the standard folder itself is kept
+        self.assertFalse(Path(app.prefix).exists())
+        self.assertFalse(core.in_steam(app, [self.steam]))
+
+    def test_program_dirs(self):
+        h = self.home.resolve()
+        exe = h / "Games/Cool Game/bin/x.exe"
+        self.assertEqual(core.program_dirs(exe, [h / "Games"], h), [h / "Games/Cool Game"])
+        self.assertEqual(core.program_dirs(exe, [h / "Games/Cool Game"], h), [h / "Games/Cool Game"])
+        self.assertEqual(core.program_dirs(h / "CoolGame/x.exe", [h / "CoolGame", h / "Other"], h),
+                         [h / "CoolGame"])
+        self.assertEqual(core.program_dirs(h / "Games/x.exe", [h / "Games"], h), [])
+
+    def test_uninstall_never_deletes_outside_home_or_standard_folders(self):
+        outside = self.tmp / "elsewhere"
+        outside.mkdir()
+        (self.home / "Downloads" / "keep.txt").write_text("x")
+        app = core.App("x", "X", "/x.exe", str(self.tmp / "nope"), "P", "proton", "/p",
+                       extra_dirs=[str(outside), str(self.home), str(self.home / "Downloads"), "/"])
+        self.assertEqual(core.safe_extra_dirs(app), [])
+        core.uninstall(app, self.paths, roots=[self.steam])
+        self.assertTrue(outside.exists())
+        self.assertTrue((self.home / "Downloads" / "keep.txt").exists())
+
+    def test_in_steam_after_removal_in_steam(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        core.remove_steam_shortcut(app.steam_appid, [self.steam])  # the user deleted it in Steam
+        self.assertFalse(core.in_steam(app, [self.steam]))
+        self.assertTrue(Path(app.prefix).exists())  # files are still there until uninstalled
+
     def test_cancel_restores_nothing_left_behind(self):
         os.environ["FAKE_SLEEP"] = "30"
         inst = self.home / "Downloads" / "x.exe"

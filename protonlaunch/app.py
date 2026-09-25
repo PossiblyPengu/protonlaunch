@@ -54,6 +54,34 @@ def ago(ts: float) -> str:
     return time.strftime("%b %d, %Y", time.localtime(ts))
 
 
+def on_choose(lst: QListWidget, handler: Callable[[QListWidgetItem], None]) -> None:
+    """Call handler once per choice: tap/click, Enter, or the controller's A.
+
+    A mouse double-click emits clicked, then doubleClicked + activated (or, if the list changed in
+    between, a second clicked); only the first click counts. Keyboard/controller use activated.
+    """
+    state = {"double": False, "last_click": 0.0}
+
+    def clicked(item: QListWidgetItem) -> None:
+        # If the first click changed the list (opened a folder), Qt turns the second click of a
+        # double-click into a fresh click on whatever is now under the pointer. Ignore it.
+        now = time.monotonic()
+        if now - state["last_click"] < QApplication.doubleClickInterval() / 1000:
+            return
+        state["last_click"] = now
+        handler(item)
+
+    def activated(item: QListWidgetItem) -> None:
+        if state["double"]:
+            state["double"] = False
+            return
+        handler(item)
+
+    lst.itemClicked.connect(clicked)
+    lst.itemDoubleClicked.connect(lambda _i: state.update(double=True))
+    lst.itemActivated.connect(activated)
+
+
 def glyph_icon(kind: str) -> QIcon:
     pm = QPixmap(48, 48)
     pm.fill(Qt.GlobalColor.transparent)
@@ -88,6 +116,20 @@ class InstallThread(QThread):
             self.cancelled.emit()
         except Exception as e:  # noqa: BLE001 — anything here is shown to the user
             self.failed.emit(str(e))
+
+
+class SizesThread(QThread):
+    size = pyqtSignal(str, object)  # app id, bytes (object: sizes can exceed 32-bit int)
+
+    def __init__(self, apps: list[core.App]):
+        super().__init__()
+        self.apps = apps
+
+    def run(self) -> None:
+        for app in self.apps:
+            if self.isInterruptionRequested():
+                return
+            self.size.emit(app.id, core.app_size(app))
 
 
 class UpdateCheckThread(QThread):
@@ -188,6 +230,12 @@ class HomePage(Page):
         lay.addLayout(self.grid)
         self.note = label("", "muted")
         lay.addWidget(self.note)
+        lay.addSpacing(8)
+        manage = QHBoxLayout()
+        self.manage_btn = button("", slot=lambda: self.win.show_installed())
+        manage.addWidget(self.manage_btn)
+        manage.addStretch(1)
+        lay.addLayout(manage)
         lay.addStretch(1)
         self.tiles: list[Tile] = []
 
@@ -225,6 +273,9 @@ class HomePage(Page):
         else:
             self.note.setText("")
         self.note.setVisible(bool(self.note.text()))
+        count = len(self.win.library.load())
+        self.manage_btn.setText(f"Installed programs ({count})  ·  uninstall")
+        self.manage_btn.setVisible(count > 0)
 
     def enter(self) -> None:
         self.refresh()
@@ -270,8 +321,7 @@ class BrowserPage(Page):
         lay.addLayout(self.places)
         self.list = QListWidget()
         self.list.setIconSize(self.list.iconSize() * 1.6)
-        self.list.itemActivated.connect(self._activate)
-        self.list.itemClicked.connect(self._activate)
+        on_choose(self.list, self._activate)
         lay.addWidget(self.list, 1)
         self.cwd = Path.home()
         self.roots: list[Path] = []
@@ -590,6 +640,75 @@ class DonePage(Page):
         return [("A", "Select", self.win.nav_activate), ("B", "Done", self.back)]
 
 
+class InstalledPage(Page):
+    """What ProtonLaunch installed, to uninstall things. Deliberately not a launcher: no Play here."""
+
+    title = "Installed programs"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setSpacing(12)
+        lay.addWidget(label("Installed programs", "h1"))
+        lay.addWidget(label("Pick a program to uninstall it. You play them from your Steam library.", "dim"))
+        self.list = QListWidget()
+        self.list.setIconSize(self.list.iconSize() * 2.5)
+        on_choose(self.list, self._activate)
+        lay.addWidget(self.list, 1)
+        self.empty = label("Nothing installed with ProtonLaunch yet.", "muted")
+        lay.addWidget(self.empty)
+        self.apps: dict[str, core.App] = {}
+        self.sizes: dict[str, int] = {}
+        self.thread: SizesThread | None = None
+
+    def refresh(self) -> None:
+        apps = sorted(self.win.library.load(), key=lambda a: a.installed_at, reverse=True)
+        self.apps = {a.id: a for a in apps}
+        self.list.clear()
+        for app in apps:
+            it = QListWidgetItem(self._text(app))
+            icon = artwork.load_icon(app.icon)
+            it.setIcon(QIcon(QPixmap.fromImage(icon)) if icon is not None else glyph_icon("disc"))
+            it.setData(Qt.ItemDataRole.UserRole, app.id)
+            self.list.addItem(it)
+        self.list.setVisible(bool(apps))
+        self.empty.setVisible(not apps)
+        if apps:
+            self.list.setCurrentRow(0)
+        if self.thread is not None:
+            self.thread.requestInterruption()
+        t = SizesThread([a for a in apps if a.id not in self.sizes])
+        t.size.connect(self._on_size)
+        t.finished.connect(t.deleteLater)
+        self.thread = t
+        t.start()
+
+    def _text(self, app: core.App) -> str:
+        size = core.human_size(self.sizes[app.id]) if app.id in self.sizes else "…"
+        where = "In Steam" if core.in_steam(app) else "Removed from Steam — files still on disk"
+        return f"{app.name}\nInstalled {ago(app.installed_at)}  ·  {size}  ·  {where}"
+
+    def _on_size(self, app_id: str, size: int) -> None:
+        self.sizes[app_id] = size
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == app_id and app_id in self.apps:
+                it.setText(self._text(self.apps[app_id]))
+
+    def _activate(self, item: QListWidgetItem) -> None:
+        app = self.apps.get(item.data(Qt.ItemDataRole.UserRole))
+        if app is not None:
+            self.win.uninstall(app, self.sizes.get(app.id))
+
+    def enter(self) -> None:
+        self.refresh()
+        (self.list if self.list.isVisible() else self).setFocus()
+
+    def hints(self):
+        return [("A", "Uninstall", self.win.nav_activate), ("B", "Back", self.back)]
+
+
 class UpdatePage(Page):
     title = "Update"
 
@@ -705,7 +824,8 @@ class MainWindow(QMainWindow):
         self.pick = PickPage(self)
         self.done = DonePage(self)
         self.updating = UpdatePage(self)
-        for p in (self.home, self.browser, self.progress, self.pick, self.done, self.updating):
+        self.installed = InstalledPage(self)
+        for p in (self.home, self.browser, self.progress, self.pick, self.done, self.updating, self.installed):
             self.stack.addWidget(p)
 
         self.nav = Nav(QApplication.instance(), self.on_action, busy=lambda: self.thread is not None) \
@@ -940,9 +1060,13 @@ class MainWindow(QMainWindow):
     def open_menu(self) -> None:
         if QApplication.activeModalWidget() is not None:
             return
-        options = ("Check for updates", "Add ProtonLaunch to Steam", "Look for installers again", "About",
-                   "Quit ProtonLaunch", "Close")
+        options = ("Installed programs (uninstall)", "Check for updates", "Add ProtonLaunch to Steam",
+                   "Look for installers again", "About", "Quit ProtonLaunch", "Close")
         choice = Sheet.ask(self, "Menu", "", options, primary=len(options) - 1)
+        if choice == 0:
+            self.show_installed()
+            return
+        choice -= 1
         if choice == 0:
             self.check_for_updates(manual=True)
         elif choice == 1:
@@ -956,6 +1080,37 @@ class MainWindow(QMainWindow):
                       f"Installed programs: {self.paths.prefixes}\nInstall logs: {self.paths.logs}", ("Close",))
         elif choice == 4:
             self.close()
+
+    # ── uninstalling ─────────────────────────────────────────────────────
+
+    def show_installed(self) -> None:
+        if self.thread is not None:
+            return
+        self.go(self.installed)
+
+    def uninstall(self, app: core.App, size: int | None = None) -> None:
+        extra = core.safe_extra_dirs(app)
+        parts = ["the program and anything saved inside its Windows folder (many games keep their saves "
+                 "there)"]
+        parts += [f"its folder {d}" for d in extra]
+        parts.append("its Steam shortcut and artwork" if app.steam_appid else "its shortcut")
+        freed = f"This frees {core.human_size(size)}.\n\n" if size else ""
+        text = freed + "Deletes " + "; ".join(parts) + "."
+        if Sheet.ask(self, f"Uninstall {app.name}?", text, ("Uninstall", "Keep"), primary=1, danger=(0,)) != 0:
+            return
+        core.uninstall(app, self.paths)
+        self.installed.sizes.pop(app.id, None)
+        msg = f"{app.name} uninstalled"
+        if size:
+            msg += f" — freed {core.human_size(size)}"
+        if app.steam_appid and core.steam_is_running():
+            msg += ". Restart Steam to update your library."
+        self.flash(msg)
+        self.refresh_space()
+        if self.library.load():
+            self.installed.enter()
+        else:
+            self.go_home()
 
     # ── updates ──────────────────────────────────────────────────────────
 

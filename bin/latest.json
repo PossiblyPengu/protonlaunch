@@ -1,5 +1,5 @@
 {
-  "version": "2.2.0",
-  "sha256": "8eed47c8f9f7746937b5f177d12e0efa522919653c7b1d578287ef4e0754c764",
-  "notes": "In-app updates, Steam Deck\u2013first UI, controller support"
+  "version": "2.3.0",
+  "sha256": "c8666d69b5d55c939906dffc2e084cae5b2509243286e318a119b3b70dc0e7de",
+  "notes": "Uninstall programs from ProtonLaunch (Installed programs)"
 }
