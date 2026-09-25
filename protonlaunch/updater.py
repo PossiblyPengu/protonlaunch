@@ -13,6 +13,7 @@ import os
 import re
 import ssl
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,7 +98,8 @@ def from_release(api_url: str = RELEASE_API) -> Update | None:
 
 def from_manifest(base_url: str) -> Update | None:
     """bin/latest.json next to a prebuilt binary: {"version", "sha256", "notes"?}."""
-    data = json.loads(fetch(f"{base_url}/latest.json"))
+    # The query defeats raw.githubusercontent's ~5 minute cache (including cached 404s).
+    data = json.loads(fetch(f"{base_url}/latest.json?t={int(time.time())}"))
     return Update(str(data["version"]), f"{base_url}/{ASSET}", str(data["sha256"]).lower(),
                   str(data.get("notes", ""))[:600], base_url)
 
