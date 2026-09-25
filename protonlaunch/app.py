@@ -4,6 +4,7 @@ It is deliberately not a launcher or library — once installed, programs live i
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -13,6 +14,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QRectF, QThread, QTimer, QUrl, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPixmap
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -33,7 +35,7 @@ from PyQt6.QtWidgets import (
 
 from . import __version__, artwork, core, theme, updater
 from .nav import Nav
-from .widgets import HintBar, Sheet, Steps, Tile, Toast, button, draw_glyph, label
+from .widgets import ElideLabel, HintBar, Sheet, Steps, Tile, Toast, breakable, button, draw_glyph, label
 
 COLUMNS = 5
 MAX_FOUND = 2 * COLUMNS - 1  # two rows of tiles, the first being "Browse files"
@@ -115,7 +117,25 @@ class InstallThread(QThread):
         except core.Cancelled:
             self.cancelled.emit()
         except Exception as e:  # noqa: BLE001 — anything here is shown to the user
-            self.failed.emit(str(e))
+            self.failed.emit(str(e) or type(e).__name__)
+
+
+class Worker(QThread):
+    """Runs fn(status) off the UI thread: adding to Steam can wait a few seconds for Steam."""
+
+    status = pyqtSignal(str)
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, fn: Callable[[Callable[[str], None]], object]):
+        super().__init__()
+        self.fn = fn
+
+    def run(self) -> None:
+        try:
+            self.done.emit(self.fn(self.status.emit))
+        except Exception as e:  # noqa: BLE001 — shown to the user
+            self.failed.emit(str(e) or type(e).__name__)
 
 
 class SizesThread(QThread):
@@ -213,7 +233,7 @@ class HomePage(Page):
                                   " border-radius: 12px; }")
         b = QHBoxLayout(self.banner)
         b.setContentsMargins(20, 10, 12, 10)
-        self.banner_text = label("", wrap=False)
+        self.banner_text = ElideLabel(mode=Qt.TextElideMode.ElideRight)
         b.addWidget(self.banner_text)
         b.addStretch(1)
         self.update_btn = button("Update now", "primary", lambda: self.win.start_update())
@@ -314,7 +334,7 @@ class BrowserPage(Page):
         lay.setSpacing(12)
         self.heading = label("Choose an installer", "h1")
         lay.addWidget(self.heading)
-        self.where = label("", "muted", wrap=False)
+        self.where = ElideLabel(obj="muted")
         lay.addWidget(self.where)
         self.places = QHBoxLayout()
         self.places.setSpacing(10)
@@ -411,7 +431,7 @@ class InstallPage(Page):
         lay.setSpacing(14)
         self.heading = label("", "h1")
         lay.addWidget(self.heading)
-        self.source = label("", "muted", wrap=False)
+        self.source = ElideLabel(obj="muted")
         lay.addWidget(self.source)
         lay.addSpacing(8)
         self.steps = Steps()
@@ -561,7 +581,10 @@ class PickPage(Page):
             self.win.finish_install(Path(item.data(Qt.ItemDataRole.UserRole)), self.name.text())
 
     def back(self) -> None:
-        self.win.discard_pending()
+        if Sheet.ask(self, "Throw this install away?", "Everything the installer put on the Deck is deleted. "
+                     "To keep it, pick the program instead — or use Browse… to find it.",
+                     ("Delete it", "Keep"), primary=1, danger=(0,)) == 0:
+            self.win.discard_pending()
 
 
 class DonePage(Page):
@@ -598,10 +621,15 @@ class DonePage(Page):
         self.app = app
         icon = artwork.load_icon(app.icon)
         self.art.setPixmap(pixmap(artwork.render("", app.name, icon), 460, 215))
-        if app.steam_appid:
+        if app.steam_added == "live":
             self.heading.setText(f"✓  {app.name} is in your Steam library")
-            msg = "Restart Steam to see it  (STEAM button → Power → Restart Steam)." \
-                if core.steam_is_running() else "It'll be there next time you open Steam."
+            msg = "It's there now — no restart needed."
+        elif app.steam_added == "file" and not core.steam_is_running():
+            self.heading.setText(f"✓  {app.name} is in your Steam library")
+            msg = "It'll be there next time you open Steam."
+        elif app.steam_added == "file":
+            self.heading.setText(f"✓  {app.name} is installed")
+            msg = steam_file_note()
         else:
             self.heading.setText(f"✓  {app.name} is installed")
             msg = "No Steam account was found on this Deck, so it couldn't be added to Steam."
@@ -640,6 +668,12 @@ class DonePage(Page):
         return [("A", "Select", self.win.nav_activate), ("B", "Done", self.back)]
 
 
+def steam_file_note() -> str:
+    return ("Steam didn't confirm the new shortcut, and Steam may undo it when it restarts. If it's missing: "
+            "in Desktop Mode, exit Steam (Steam menu → Exit), open ProtonLaunch from the app menu and use "
+            "Installed programs → Add to Steam.")
+
+
 class InstalledPage(Page):
     """What ProtonLaunch installed, to uninstall things. Deliberately not a launcher: no Play here."""
 
@@ -651,7 +685,8 @@ class InstalledPage(Page):
         lay.setContentsMargins(40, 22, 40, 20)
         lay.setSpacing(12)
         lay.addWidget(label("Installed programs", "h1"))
-        lay.addWidget(label("Pick a program to uninstall it. You play them from your Steam library.", "dim"))
+        lay.addWidget(label("Pick a program to uninstall it, or to add it back to Steam. You play them from "
+                            "your Steam library.", "dim"))
         self.list = QListWidget()
         self.list.setIconSize(self.list.iconSize() * 2.5)
         on_choose(self.list, self._activate)
@@ -660,11 +695,13 @@ class InstalledPage(Page):
         lay.addWidget(self.empty)
         self.apps: dict[str, core.App] = {}
         self.sizes: dict[str, int] = {}
+        self.in_steam: dict[str, bool] = {}
         self.thread: SizesThread | None = None
 
     def refresh(self) -> None:
         apps = sorted(self.win.library.load(), key=lambda a: a.installed_at, reverse=True)
         self.apps = {a.id: a for a in apps}
+        self.in_steam = {a.id: core.in_steam(a) for a in apps}  # read Steam's list once per refresh
         self.list.clear()
         for app in apps:
             it = QListWidgetItem(self._text(app))
@@ -677,16 +714,21 @@ class InstalledPage(Page):
         if apps:
             self.list.setCurrentRow(0)
         if self.thread is not None:
-            self.thread.requestInterruption()
+            self.thread.requestInterruption()  # it clears self.thread when it's done; never touch a dead one
         t = SizesThread([a for a in apps if a.id not in self.sizes])
         t.size.connect(self._on_size)
-        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda t=t: self._size_thread_done(t))
         self.thread = t
         t.start()
 
+    def _size_thread_done(self, t: SizesThread) -> None:
+        if self.thread is t:
+            self.thread = None
+        t.deleteLater()
+
     def _text(self, app: core.App) -> str:
         size = core.human_size(self.sizes[app.id]) if app.id in self.sizes else "…"
-        where = "In Steam" if core.in_steam(app) else "Removed from Steam — files still on disk"
+        where = "In Steam" if self.in_steam.get(app.id) else "Not in Steam"
         return f"{app.name}\nInstalled {ago(app.installed_at)}  ·  {size}  ·  {where}"
 
     def _on_size(self, app_id: str, size: int) -> None:
@@ -698,7 +740,16 @@ class InstalledPage(Page):
 
     def _activate(self, item: QListWidgetItem) -> None:
         app = self.apps.get(item.data(Qt.ItemDataRole.UserRole))
-        if app is not None:
+        if app is None or self.win.busy_with("uninstall"):
+            return
+        if self.in_steam.get(app.id):
+            self.win.uninstall(app, self.sizes.get(app.id))
+            return
+        choice = Sheet.ask(self, app.name, "This program isn't in your Steam library.",
+                           ("Add to Steam", "Uninstall", "Cancel"))
+        if choice == 0:
+            self.win.add_to_steam(app)
+        elif choice == 1:
             self.win.uninstall(app, self.sizes.get(app.id))
 
     def enter(self) -> None:
@@ -706,7 +757,7 @@ class InstalledPage(Page):
         (self.list if self.list.isVisible() else self).setFocus()
 
     def hints(self):
-        return [("A", "Uninstall", self.win.nav_activate), ("B", "Back", self.back)]
+        return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
 
 
 class UpdatePage(Page):
@@ -801,6 +852,7 @@ class MainWindow(QMainWindow):
         self.update_dismissed = False
         self.update_check: UpdateCheckThread | None = None
         self.update_thread: UpdateDownloadThread | None = None
+        self.workers: set[QThread] = set()
 
         self.setWindowTitle("ProtonLaunch")
         self.resize(1280, 800)
@@ -816,7 +868,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.stack, 1)
         self.hint_bar = HintBar()
         v.addWidget(self.hint_bar)
-        self.toast = Toast(root)
+        self.toast = Toast(self)  # on the window itself, so it stays visible over sheets
 
         self.home = HomePage(self)
         self.browser = BrowserPage(self)
@@ -830,7 +882,8 @@ class MainWindow(QMainWindow):
 
         self.nav = Nav(QApplication.instance(), self.on_action, busy=lambda: self.thread is not None) \
             if use_nav else None
-        QApplication.instance().focusChanged.connect(lambda *_: self.update_hints())
+        # A bound method (not a lambda): Qt disconnects it automatically when the window goes away.
+        QApplication.instance().focusChanged.connect(self._focus_changed)
         self.refresh_launchers()
         self.go(self.home)
         if check_updates is None:
@@ -859,6 +912,9 @@ class MainWindow(QMainWindow):
         h.addWidget(menu)
         return bar
 
+    def _focus_changed(self, _old, _new) -> None:
+        self.update_hints()
+
     def update_hints(self) -> None:
         page = self.stack.currentWidget()
         if isinstance(page, Page):
@@ -884,10 +940,9 @@ class MainWindow(QMainWindow):
             self.nav.activate()
 
     def on_action(self, action: str) -> None:
-        modal = QApplication.activeModalWidget()
-        if isinstance(modal, Sheet):
+        if Sheet.current is not None:
             if action == "b":
-                modal.reject()
+                Sheet.current.reject()
             return
         page = self.stack.currentWidget()
         if not isinstance(page, Page):
@@ -904,8 +959,8 @@ class MainWindow(QMainWindow):
                 sb = area.verticalScrollBar()
                 sb.setValue(sb.value() + (-1 if action == "lb" else 1) * area.viewport().height() * 3 // 4)
 
-    def flash(self, text: str) -> None:
-        self.toast.show_message(text)
+    def flash(self, text: str, ms: int = 2600) -> None:
+        self.toast.show_message(text, ms)
 
     # ── install flow ─────────────────────────────────────────────────────
 
@@ -918,14 +973,26 @@ class MainWindow(QMainWindow):
         self.go(self.browser)
 
     def confirm_install(self, installer: Path) -> None:
+        if self.thread is not None or self.busy:
+            self.flash("Finish what's running first")
+            return
         name = core.guess_name(installer)
-        size = core.human_size(core.files_size(core.installer_files(installer)))
-        free = core.human_size(core.free_space(self.paths.root))
-        choice = Sheet.ask(self, f"Install {name}?",
-                           f"{installer}\n\nInstaller: {size}   ·   Free space: {free}\n\n"
-                           "The installer opens next — click through it as usual. ProtonLaunch then finds the "
-                           "program and adds it to Steam.", ("Install", "Cancel"))
-        if choice == 0:
+        size_b = core.files_size(core.installer_files(installer))
+        free_b = core.free_space(self.paths.root)
+        notes = []
+        before = next((a for a in self.library.load() if a.installer == str(installer)), None)
+        if before is not None:
+            notes.append(f"You already installed this as {before.name} ({ago(before.installed_at)}). "
+                         "Installing again makes a second copy.")
+        if size_b and free_b < size_b * 2:
+            notes.append("Free space looks tight — installed games usually take more room than their "
+                         "installer.")
+        text = (f"{breakable(installer)}\n\nInstaller: {core.human_size(size_b)}   ·   "
+                f"Free space: {core.human_size(free_b)}\n\n")
+        text += "\n".join(f"⚠  {n}" for n in notes) + ("\n\n" if notes else "")
+        text += ("The installer opens next — click through it as usual. ProtonLaunch then finds the program "
+                 "and adds it to Steam.")
+        if Sheet.ask(self, f"Install {name}?", text, ("Install", "Cancel")) == 0:
             self.start_install(installer)
 
     def start_install(self, installer: Path, allow_no_container: bool = False) -> None:
@@ -1007,8 +1074,23 @@ class MainWindow(QMainWindow):
         self.go(self.pick)
 
     def use_portable(self) -> None:
-        if self.pending:
-            self.finish_install(core.adopt_portable(self.pending), self.pick.name.text())
+        if not self.pending:
+            return
+        pending = self.pending
+        whole = False
+        offer = core.portable_folder(pending)
+        if offer is not None:
+            folder, size = offer
+            choice = Sheet.ask(self, "Copy its folder too?",
+                               f"“{folder.name}” ({core.human_size(size)}) has other files next to "
+                               f"{pending.installer.name}. Portable programs usually need them.",
+                               ("Copy the folder", "Just the file", "Cancel"))
+            if choice not in (0, 1):
+                return
+            whole = choice == 0
+        # Copying can take a while: it happens in the background.
+        self.finish_install(lambda: core.adopt_portable(pending, whole), self.pick.name.text(),
+                            icon_from=pending.installer)
 
     def browse_program_for_pending(self) -> None:
         if not self.pending:
@@ -1027,23 +1109,87 @@ class MainWindow(QMainWindow):
             self.pending = None
         self.go_home()
 
-    def finish_install(self, exe: Path, name: str) -> None:
+    def finish_install(self, exe: Path | Callable[[], Path], name: str, icon_from: Path | None = None) -> None:
+        """Finish in the background. `exe` may be a function producing it (e.g. copying a portable
+        program into place first)."""
         pending, self.pending = self.pending, None
         if pending is None or self.job is None:
             return
-        self.progress.stop()
-        icon_img = artwork.load_exe_icon(exe)
+        icon_img = artwork.load_exe_icon(icon_from or exe)
         icon_path = artwork.save_icon(icon_img, self.paths.icons / f"{pending.id}.png") if icon_img else ""
-        try:
-            app = self.job.finish(pending, exe, name, icon=icon_path)
-        except Exception as e:  # noqa: BLE001
-            Sheet.ask(self, "Couldn't finish", str(e), ("Close",))
+        job = self.job
+        if self.stack.currentWidget() is not self.progress:
+            self.go(self.progress)
+        self.progress.on_status("Adding to Steam…", "steam")
+
+        def run(status: Callable[[str], None]) -> core.App:
+            job.status, job._log_cb = status, lambda _line: None
+            program = exe() if callable(exe) else exe
+            return job.finish(pending, program, name, icon=icon_path)
+
+        def finished(app: core.App) -> None:
+            self.progress.stop()
+            self._write_art(app, icon_img)
+            self.done.load(app)
+            self.go(self.done)
+
+        def failed(message: str) -> None:
+            self.progress.stop()
+            Sheet.ask(self, "Couldn't finish", message, ("Close",))
             self.go_home()
-            return
+
+        self.run_worker(run, finished, failed, status=lambda text: self.progress.on_status(text, "steam"))
+
+    @property
+    def busy(self) -> bool:
+        return bool(self.workers)
+
+    def busy_with(self, kind: str) -> bool:
+        if any(getattr(w, "kind", "") == kind for w in self.workers):
+            self.flash("Still working on the last one…")
+            return True
+        return False
+
+    def run_worker(self, fn, on_done, on_failed, status=None, kind: str = "") -> None:
+        w = Worker(fn)
+        w.kind = kind
+        w.done.connect(on_done)
+        w.failed.connect(on_failed)
+        if status:
+            w.status.connect(status)
+        w.finished.connect(w.deleteLater)
+        w.finished.connect(lambda: self.workers.discard(w))
+        self.workers.add(w)
+        w.start()
+
+    def _write_art(self, app: core.App, icon_img: QImage | None) -> None:
+        artwork.remove_files(app.artwork)
         app.artwork = artwork.write_steam_artwork(app.steam_appid, app.name, icon_img, core.steam_grid_dirs())
         self.library.upsert(app)
-        self.done.load(app)
-        self.go(self.done)
+
+    def add_to_steam(self, app: core.App) -> None:
+        """Put an installed program (back) into Steam — e.g. if a Steam restart dropped it."""
+        self.flash(f"Adding {app.name} to Steam…")
+
+        def run(_status) -> core.App:
+            app.steam_appid, app.steam_added = core.add_to_steam(app)
+            return app
+
+        def finished(a: core.App) -> None:
+            self._write_art(a, artwork.load_icon(a.icon))
+            if a.steam_added == "live":
+                self.flash(f"{a.name} is in your Steam library")
+            elif a.steam_added == "file":
+                Sheet.ask(self, "Almost there", steam_file_note(), ("Close",))
+            else:
+                Sheet.ask(self, "Couldn't add to Steam", "No Steam account was found on this Deck.", ("Close",))
+            if self.stack.currentWidget() is self.installed:
+                self.installed.enter()
+
+        if self.busy_with("steam"):
+            return
+        self.run_worker(run, finished, lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)),
+                        kind="steam")
 
     def refresh_launchers(self) -> None:
         """Rewrite launch scripts so programs installed by older versions get current fixes."""
@@ -1058,7 +1204,7 @@ class MainWindow(QMainWindow):
     # ── menu ─────────────────────────────────────────────────────────────
 
     def open_menu(self) -> None:
-        if QApplication.activeModalWidget() is not None:
+        if Sheet.current is not None:
             return
         options = ("Installed programs (uninstall)", "Check for updates", "Add ProtonLaunch to Steam",
                    "Look for installers again", "About", "Quit ProtonLaunch", "Close")
@@ -1085,6 +1231,7 @@ class MainWindow(QMainWindow):
 
     def show_installed(self) -> None:
         if self.thread is not None:
+            self.flash("Finish the install first")
             return
         self.go(self.installed)
 
@@ -1092,32 +1239,38 @@ class MainWindow(QMainWindow):
         extra = core.safe_extra_dirs(app)
         parts = ["the program and anything saved inside its Windows folder (many games keep their saves "
                  "there)"]
-        parts += [f"its folder {d}" for d in extra]
+        parts += [f"its folder {breakable(d)}" for d in extra]
         parts.append("its Steam shortcut and artwork" if app.steam_appid else "its shortcut")
         freed = f"This frees {core.human_size(size)}.\n\n" if size else ""
         text = freed + "Deletes " + "; ".join(parts) + "."
         if Sheet.ask(self, f"Uninstall {app.name}?", text, ("Uninstall", "Keep"), primary=1, danger=(0,)) != 0:
             return
-        core.uninstall(app, self.paths)
-        self.installed.sizes.pop(app.id, None)
-        msg = f"{app.name} uninstalled"
-        if size:
-            msg += f" — freed {core.human_size(size)}"
-        if app.steam_appid and core.steam_is_running():
-            msg += ". Restart Steam to update your library."
-        self.flash(msg)
-        self.refresh_space()
-        if self.library.load():
-            self.installed.enter()
-        else:
-            self.go_home()
+        # Deleting a big game can take a while: do it in the background (the list shows it's going).
+        self.flash(f"Uninstalling {app.name}…", ms=60_000)
+
+        def finished(_result) -> None:
+            self.installed.sizes.pop(app.id, None)
+            msg = f"{app.name} uninstalled"
+            if size:
+                msg += f" — freed {core.human_size(size)}"
+            if app.steam_appid and core.steam_is_running():
+                msg += ". If it's still listed in Steam, remove it there too."
+            self.flash(msg)
+            self.refresh_space()
+            if self.stack.currentWidget() is self.installed:
+                if self.library.load():
+                    self.installed.enter()
+                else:
+                    self.go_home()
+
+        self.run_worker(lambda _s: core.uninstall(app, self.paths), finished,
+                        lambda m: Sheet.ask(self, "Couldn't uninstall", m, ("Close",)), kind="uninstall")
 
     # ── updates ──────────────────────────────────────────────────────────
 
     def check_for_updates(self, manual: bool) -> None:
         if manual and updater.self_path() is None:
-            Sheet.ask(self, "Updates", "Updating from inside the app works for the downloaded ProtonLaunch. "
-                      "This copy runs from source — update it with git pull, or reinstall with get.sh.", ("Close",))
+            Sheet.ask(self, "Updates", updater.why_no_self_update(), ("Close",))
             return
         if self.update_check is not None:
             return
@@ -1196,11 +1349,32 @@ class MainWindow(QMainWindow):
         if not exe.exists():
             Sheet.ask(self, "Add to Steam", "Install ProtonLaunch with get.sh first.", ("Close",))
             return
-        appid, users = core.add_steam_shortcut("ProtonLaunch", str(exe), str(exe.parent))
-        if users:
-            artwork.write_steam_artwork(appid, "ProtonLaunch", None, core.steam_grid_dirs())
-        Sheet.ask(self, "Add to Steam", "Added! Restart Steam to find ProtonLaunch in your library." if users
-                  else "No Steam account found on this device.", ("Close",))
+        if core.find_shortcut(str(exe)):
+            Sheet.ask(self, "Add to Steam", "ProtonLaunch is already in your Steam library.", ("Close",))
+            return
+        if self.busy_with("steam"):
+            return
+        self.flash("Adding ProtonLaunch to Steam…")
+
+        def finished(result) -> None:
+            appid, how = result
+            if how:
+                artwork.write_steam_artwork(appid, "ProtonLaunch", None, core.steam_grid_dirs())
+            msg = {"live": "Done — ProtonLaunch is in your Steam library.",
+                   "file": steam_file_note()}.get(how, "No Steam account found on this device.")
+            Sheet.ask(self, "Add to Steam", msg, ("Close",))
+
+        self.run_worker(lambda _s: core.add_shortcut("ProtonLaunch", str(exe), str(exe.parent)), finished,
+                        lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)), kind="steam")
+
+    def open_files(self, files: list[str]) -> None:
+        """Another launch (e.g. Open With in Desktop Mode) handed us an installer."""
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if files and self.thread is None and Sheet.current is None:
+            self.confirm_install(Path(files[0]))
 
     # ── drag & drop, closing ─────────────────────────────────────────────
 
@@ -1229,6 +1403,16 @@ class MainWindow(QMainWindow):
                 return
             self.thread.job.cancel()
             self.thread.wait(15000)
+        # Let background jobs (adding to Steam, uninstalling, updating) finish: a QThread destroyed
+        # mid-run takes the whole app down with it.
+        if self.update_thread is not None:
+            self.update_thread.requestInterruption()
+        for t in [*self.workers, self.update_thread, self.update_check, self.installed.thread]:
+            if t is not None:
+                try:
+                    t.wait(20000)
+                except RuntimeError:  # already deleted
+                    pass
         if self.nav:
             self.nav.stop()
         event.accept()
@@ -1250,14 +1434,67 @@ def main(argv: list[str] | None = None) -> int:
         return updater.cli_update(__version__)
     app = QApplication(argv[:1])
     app.setApplicationName("ProtonLaunch")
+    files = [str(Path(a).resolve()) for a in args if not a.startswith("-")]
+    if SingleInstance.hand_off(files):
+        print("ProtonLaunch is already open — passed it on.")
+        return 0
     app.setStyle("Fusion")
     app.setStyleSheet(theme.STYLE)
     win = MainWindow()
+    instance = SingleInstance()
+    instance.listen(win.open_files)
     if core.in_game_mode() or os.environ.get("PROTONLAUNCH_FULLSCREEN"):
         win.showFullScreen()
     else:
         win.show()
-    files = [a for a in args if not a.startswith("-")]
     if files:
         QTimer.singleShot(0, lambda: win.confirm_install(Path(files[0])))
     return app.exec()
+
+
+class SingleInstance:
+    """One ProtonLaunch at a time: a second launch hands its installer to the open window.
+
+    Two windows installing at once would race on the same records and prefixes."""
+
+    NAME = f"protonlaunch-{os.getuid()}"
+
+    def __init__(self) -> None:
+        self.server: QLocalServer | None = None
+        self.pending: dict[QLocalSocket, bytes] = {}
+
+    @classmethod
+    def hand_off(cls, files: list[str], name: str | None = None) -> bool:
+        sock = QLocalSocket()
+        sock.connectToServer(name or cls.NAME)
+        if not sock.waitForConnected(500):
+            return False
+        sock.write(json.dumps(files).encode())
+        sock.flush()
+        sock.waitForBytesWritten(1000)
+        sock.disconnectFromServer()
+        return True
+
+    def listen(self, on_files: Callable[[list[str]], None], name: str | None = None) -> None:
+        name = name or self.NAME
+        QLocalServer.removeServer(name)  # a stale socket from a crash
+        self.server = QLocalServer()
+        self.server.listen(name)
+
+        def accept() -> None:
+            while self.server.hasPendingConnections():
+                sock = self.server.nextPendingConnection()
+                self.pending[sock] = b""
+                sock.readyRead.connect(lambda s=sock: self.pending.__setitem__(s, self.pending[s] + bytes(s.readAll())))
+                sock.disconnected.connect(lambda s=sock: done(s))
+
+        def done(sock: QLocalSocket) -> None:
+            data = self.pending.pop(sock, b"") + bytes(sock.readAll())
+            sock.deleteLater()
+            try:
+                files = [str(f) for f in json.loads(data.decode() or "[]")]
+            except (ValueError, UnicodeDecodeError, TypeError):
+                files = []
+            on_files(files)
+
+        self.server.newConnection.connect(accept)

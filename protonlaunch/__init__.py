@@ -1,3 +1,3 @@
 """ProtonLaunch — install Windows programs on Steam Deck with one tap."""
 
-__version__ = "2.3.0"
+__version__ = "2.6.0"

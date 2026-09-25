@@ -212,7 +212,7 @@ class TestWindow(Env):
         self.assertEqual(self.win.pick.heading.text(), "Nothing was installed")
         self.shot("6-pick-nothing")
         self.win.use_portable()
-        self.assertIs(self.win.stack.currentWidget(), self.win.done)
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
 
     def test_failure_is_explained(self):
         os.environ["FAKE_BROKEN"] = "1"
@@ -283,11 +283,114 @@ class TestWindow(Env):
         self.answers = [0]  # Uninstall
         page._activate(page.list.item(0))
         self.assertIn("Uninstall Cool Game?", self.asked)
-        self.assertFalse(Path(app.prefix).exists())
+        self.wait_for(lambda: not Path(app.prefix).exists())  # deleted in the background
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.home)
         self.assertFalse(Path(app.extra_dirs[0]).exists())
         self.assertEqual(core.Library(self.paths).load(), [])
         self.assertIs(self.win.stack.currentWidget(), self.win.home)
         self.assertFalse(self.win.home.manage_btn.isVisible())
+
+    def test_add_back_to_steam_from_installed_programs(self):
+        inst = self.add_installer("Cool Game Setup.exe", 10)
+        self.win.start_install(inst)
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+        app = core.Library(self.paths).load()[0]
+        core.remove_steam_shortcut(app.steam_appid, [self.steam])  # e.g. Steam dropped it on restart
+        self.win.show_installed()
+        page = self.win.installed
+        self.assertIn("Not in Steam", page.list.item(0).text())
+        self.answers = [0]  # "Add to Steam"
+        page._activate(page.list.item(0))
+        self.assertEqual(self.asked[-1], "Cool Game")
+        self.wait_for(lambda: "In Steam" in page.list.item(0).text() and "Not in" not in page.list.item(0).text())
+        self.assertTrue(core.in_steam(core.Library(self.paths).load()[0], [self.steam]))
+
+    def test_long_paths_never_widen_the_window(self):
+        deep = self.downloads.joinpath(*[f"A Rather Long Folder Name Number {i}" for i in range(8)])
+        deep.mkdir(parents=True)
+        inst = deep / "setup.exe"
+        inst.write_bytes(b"MZ")
+        os.environ["FAKE_SLEEP"] = "1"
+        self.win.start_install(inst)
+        self.wait_for(lambda: "installer" in self.win.progress.status.text())
+        self.pump(10)
+        self.assertLessEqual(self.win.width(), 1280)
+        cancel = self.win.progress.cancel_btn
+        self.assertLessEqual(cancel.mapTo(self.win, cancel.rect().bottomRight()).x(), self.win.width())
+        self.assertEqual(self.win.progress.source.text(), str(inst))  # full path kept (and in tooltip)
+        self.shot("11-long-path", self.win)
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+
+    def test_reinstall_and_low_space_are_mentioned(self):
+        inst = self.add_installer("Cool Game Setup.exe", 10)
+        self.win.start_install(inst)
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+        texts = []
+        from protonlaunch.widgets import Sheet
+        Sheet.ask = staticmethod(lambda parent, title, text="", *a, **k: (texts.append(text), 1)[1])
+        self.win.confirm_install(inst)
+        self.assertIn("already installed this as Cool Game", texts[-1])
+        orig = core.free_space
+        core.free_space = lambda p: 5  # bytes
+        try:
+            self.win.confirm_install(inst)
+        finally:
+            core.free_space = orig
+        self.assertIn("Free space looks tight", texts[-1])
+
+    def test_leaving_the_pick_screen_asks_first(self):
+        os.environ["FAKE_NOTHING"] = "1"
+        self.win.start_install(self.add_installer("Tool.exe", 10))
+        self.wait_for(lambda: self.win.stack.currentWidget() is self.win.pick)
+        prefix = self.win.pending.compat_dir
+        self.answers = [1]  # Keep
+        self.win.pick.back()
+        self.assertTrue(prefix.exists())
+        self.assertIs(self.win.stack.currentWidget(), self.win.pick)
+        self.answers = [0]  # Delete it
+        self.win.pick.back()
+        self.assertFalse(prefix.exists())
+        self.assertIs(self.win.stack.currentWidget(), self.win.home)
+
+    def test_sheet_is_an_overlay_that_confines_focus(self):
+        from protonlaunch.widgets import Sheet
+        self.win.go_home()
+        results = []
+
+        def answer():
+            sheet = Sheet.current
+            results.append(sheet is not None and sheet.parent() is self.win)
+            results.append(self.win.centralWidget().isEnabled())  # everything behind is disabled
+            if sheet is None:
+                return
+            sheet.buttons[0].setFocus()
+            self.pump()
+            QTest.keyClick(sheet.buttons[0], Qt.Key.Key_Right)  # D-pad moves between the sheet's buttons
+            self.pump()
+            results.append(QApplication.focusWidget() is sheet.buttons[1])
+            QTest.keyClick(sheet.buttons[1], Qt.Key.Key_Escape)  # B closes it
+            if Sheet.current is sheet:  # safety net so a failure can't hang the test
+                sheet.reject()
+
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(50, answer)
+        choice = self._orig_ask(self.win, "Question", "?", ("One", "Two"))
+        self.assertEqual(results, [True, False, True])
+        self.assertEqual(choice, -1)
+        self.assertIsNone(Sheet.current)
+        self.assertTrue(self.win.centralWidget().isEnabled())
+
+    def test_second_launch_hands_installer_to_the_open_window(self):
+        from protonlaunch.app import SingleInstance
+        name = f"protonlaunch-test-{os.getpid()}"
+        got = []
+        inst = SingleInstance()
+        inst.listen(got.append, name=name)
+        self.assertTrue(SingleInstance.hand_off(["/home/deck/Downloads/setup.exe"], name=name))
+        self.wait_for(lambda: got)
+        self.assertEqual(got, [["/home/deck/Downloads/setup.exe"]])
+        inst.server.close()
+        self.assertFalse(SingleInstance.hand_off(["x"], name=f"{name}-nobody"))
 
     def test_double_click_picks_once(self):
         from PyQt6.QtTest import QTest
@@ -313,7 +416,7 @@ class TestWindow(Env):
                   "   ·   Free space: 200.1 GB", ("Install", "Cancel"))
         s.show()
         self.pump(10)
-        self.shot("7-sheet", s)
+        self.shot("7-sheet", self.win)  # the overlay composited over the window
         s.close()
 
 

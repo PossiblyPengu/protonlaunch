@@ -14,17 +14,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from protonlaunch import core  # noqa: E402
 
 
-def make_lnk(target: str) -> bytes:
-    """Minimal Shell Link with only a LinkInfo local base path (what Wine writes)."""
+def make_lnk(target: str | None, args: str = "", workdir: str = "", relative: str = "") -> bytes:
+    """A Shell Link like Wine writes: LinkInfo local base path, plus optional Unicode StringData
+    (relative path, working dir, arguments)."""
+    flags = 0x80  # IsUnicode
+    info = b""
+    if target:
+        flags |= 0x02  # HasLinkInfo
+        volume = struct.pack("<IIII", 0x11, 3, 0, 0x10) + b"\x00"
+        base = target.encode("cp1252") + b"\x00"
+        hdr = 0x1C
+        size = hdr + len(volume) + len(base) + 1
+        info = struct.pack("<7I", size, hdr, 1, hdr, hdr + len(volume), 0, size - 1) + volume + base + b"\x00"
+    strings = b""
+    for bit, value in ((0x08, relative), (0x10, workdir), (0x20, args)):
+        if value:
+            flags |= bit
+            strings += struct.pack("<H", len(value)) + value.encode("utf-16-le")
     header = bytearray(0x4C)
     header[0:4] = b"L\x00\x00\x00"
-    struct.pack_into("<I", header, 0x14, 0x02)  # HasLinkInfo
-    volume = struct.pack("<IIII", 0x11, 3, 0, 0x10) + b"\x00"
-    base = target.encode("cp1252") + b"\x00"
-    hdr = 0x1C
-    size = hdr + len(volume) + len(base) + 1
-    info = struct.pack("<7I", size, hdr, 1, hdr, hdr + len(volume), 0, size - 1) + volume + base + b"\x00"
-    return bytes(header) + info
+    struct.pack_into("<I", header, 0x14, flags)
+    return bytes(header) + info + strings
 
 
 def make_pe(icon: bytes, width: int = 48, bits: int = 32) -> bytes:
@@ -90,14 +100,18 @@ if [ -z "$SteamAppId$SteamGameId$UMU_ID" ] && ! [[ "$(basename "$STEAM_COMPAT_DA
 fi
 pfx="$STEAM_COMPAT_DATA_PATH/pfx"
 c="$pfx/drive_c"
-if [ "$2" = cmd.exe ]; then  # prefix setup, like real Proton: C: and Z: only
-  mkdir -p "$c/windows/system32" "$pfx/dosdevices"
-  ln -sfn ../drive_c "$pfx/dosdevices/c:"
-  ln -sfn / "$pfx/dosdevices/z:"
+# Like real Proton on every launch: create C: and Z: if they're missing (not if they exist).
+mkdir -p "$c/windows/system32" "$pfx/dosdevices"
+[ -L "$pfx/dosdevices/c:" ] || ln -s ../drive_c "$pfx/dosdevices/c:"
+[ -L "$pfx/dosdevices/z:" ] || ln -s / "$pfx/dosdevices/z:"
+echo "$1 $2" >> "$STEAM_COMPAT_DATA_PATH/proton-calls.txt"
+[ "$2" = wineboot.exe ] && exit 0
+if [ "$2" = cmd.exe ]; then  # prefix setup / the no-op used to wait for Wine
   touch "$pfx/system.reg"
   exit 0
 fi
 ls "$pfx/dosdevices" > "$STEAM_COMPAT_DATA_PATH/drives-during-install.txt"
+readlink "$pfx/dosdevices/z:" > "$STEAM_COMPAT_DATA_PATH/z-during-install.txt"
 echo "$2" > "$STEAM_COMPAT_DATA_PATH/installer-arg.txt"
 [ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
 mkdir -p "$c/Program Files/Cool Game/bin" "$c/users/steamuser/Desktop" \\
@@ -142,7 +156,7 @@ class Env(unittest.TestCase):
         self.entry_log = self.tmp / "entry.log"
         self.entry = sniper / "_v2-entry-point"
         self.entry.write_text('#!/bin/bash\necho "$@" >> "$FAKE_ENTRY_LOG"\n'
-                              '[ "$1" = --verb=waitforexitandrun ] && [ "$2" = -- ] || exit 3\n'
+                              '[[ "$1" == --verb=* ]] && [ "$2" = -- ] || exit 3\n'
                               'shift 2\nexec "$@"\n')
         self.entry.chmod(0o755)
         os.environ["FAKE_ENTRY_LOG"] = str(self.entry_log)
@@ -292,6 +306,24 @@ class TestGamepad(unittest.TestCase):
         self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 12000), [])  # hysteresis keeps it held
         self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 2000), [("right", False)])
         self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, -30000), [("left", True)])
+
+
+class TestLnkDetails(unittest.TestCase):
+    def test_args_workdir_relative(self):
+        data = make_lnk(r"C:\Games\X\x.exe", args='-windowed "some profile"', workdir=r"C:\Games\X\data")
+        info = core.lnk_info(data)
+        self.assertEqual((info.target, info.workdir, info.args),
+                         (r"C:\Games\X\x.exe", r"C:\Games\X\data", '-windowed "some profile"'))
+        self.assertEqual(core.split_windows_args(info.args), ["-windowed", "some profile"])
+        only_rel = core.lnk_info(make_lnk(None, relative=r"..\..\Games\X\x.exe"))
+        self.assertEqual((only_rel.target, only_rel.relative), (None, r"..\..\Games\X\x.exe"))
+        self.assertIsNone(core.lnk_info(make_lnk(None)))
+
+    def test_split_windows_args(self):
+        self.assertEqual(core.split_windows_args('a "b c" d'), ["a", "b c", "d"])
+        self.assertEqual(core.split_windows_args('-path="C:\\x y"  -z'), ["-path=C:\\x y", "-z"])
+        self.assertEqual(core.split_windows_args('""'), [""])
+        self.assertEqual(core.split_windows_args(""), [])
 
 
 class TestVdf(unittest.TestCase):
@@ -460,11 +492,15 @@ class TestInstallFlow(Env):
         job.close()
         self.assertEqual(job.entry, self.entry)
         calls = self.entry_log.read_text().splitlines()
-        self.assertEqual(len(calls), 2)  # Windows setup, then the installer
+        # Windows setup, wait, the installer, wait — every step inside the container, and the
+        # waits use Proton's own waitforexitandrun (the container's Wine may be invisible outside).
+        self.assertEqual(len(calls), 4)
         for c in calls:
             self.assertTrue(c.startswith(f"--verb=waitforexitandrun -- {self.proton} waitforexitandrun "))
         self.assertIn("cmd.exe /c exit", calls[0])
-        self.assertTrue(calls[1].endswith(self.installer.name))
+        self.assertIn("cmd.exe /c exit", calls[1])
+        self.assertTrue(calls[2].endswith(self.installer.name))
+        self.assertIn("cmd.exe /c exit", calls[3])
         app = job.finish(pending, pending.candidates[0].exe)
         script = Path(app.launcher).read_text()
         self.assertIn(f"ENTRY={self.entry}", script)
@@ -524,7 +560,10 @@ class TestInstallFlow(Env):
         drives = (pending.compat_dir / "drives-during-install.txt").read_text().split()
         self.assertIn("c:", drives)
         self.assertIn("d:", drives)
-        self.assertNotIn("z:", drives)  # the full "rootfs" system drive is hidden while installing
+        # Proton recreates a missing Z: on every launch, so Z: must be *repointed* (at the home
+        # folder, where the free space is) rather than removed — the fake does what Proton does.
+        z_during = (pending.compat_dir / "z-during-install.txt").read_text().strip()
+        self.assertEqual(z_during, str(self.home.resolve()))
         arg = (pending.compat_dir / "installer-arg.txt").read_text().strip()
         self.assertEqual(arg, "D:\\Downloads\\" + inst.name)
         dd = pending.pfx / "dosdevices"
@@ -592,6 +631,216 @@ class TestInstallFlow(Env):
         core.remove_steam_shortcut(app.steam_appid, [self.steam])  # the user deleted it in Steam
         self.assertFalse(core.in_steam(app, [self.steam]))
         self.assertTrue(Path(app.prefix).exists())  # files are still there until uninstalled
+
+    def _fake_steam(self, behaves: bool) -> Path:
+        """A `steam` command that, like the real client, adds the .desktop file it's handed."""
+        bindir = self.tmp / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        script = bindir / "steam"
+        repo = Path(__file__).resolve().parents[1]
+        body = ("import sys, urllib.parse, re\n"
+                f"sys.path.insert(0, {str(repo)!r})\n"
+                "from pathlib import Path\n"
+                "from protonlaunch import core\n"
+                "url = sys.argv[1]\n"
+                "assert url.startswith('steam://addnonsteamgame/')\n"
+                "text = Path(urllib.parse.unquote(url.split('/', 3)[3])).read_text()\n"
+                "name = re.search('^Name=(.*)$', text, re.M).group(1)\n"
+                "exe = re.search('^Exec=\"(.*)\"$', text, re.M).group(1)\n"
+                f"core.add_steam_shortcut(name, exe, '/', roots=[Path({str(self.steam)!r})])\n")
+        script.write_text("#!/usr/bin/env python3\n" + (body if behaves else "pass\n"))
+        script.chmod(0o755)
+        os.environ["PATH"] = f"{bindir}:{os.environ['PATH']}"
+        return bindir
+
+    def _installed_app(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)  # Steam not running here: file edit
+        core.remove_steam_shortcut(app.steam_appid, [self.steam])
+        self.assertFalse(core.in_steam(app, [self.steam]))
+        return app
+
+    def test_add_to_running_steam_goes_through_steam(self):
+        app = self._installed_app()
+        self._fake_steam(behaves=True)
+        appid, how = core.add_to_steam(app, [self.steam], running=True, wait=5)
+        self.assertEqual(how, "live")
+        self.assertEqual(appid, core.find_shortcut(app.launcher, [self.steam]))
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        entry = core.desktop_entry_path(app).read_text()
+        self.assertIn(f'Exec="{app.launcher}"', entry)
+        self.assertIn("Categories=Game;", entry)
+
+    def test_running_steam_that_ignores_the_request_falls_back_to_the_file(self):
+        app = self._installed_app()
+        self._fake_steam(behaves=False)
+        appid, how = core.add_to_steam(app, [self.steam], running=True, wait=1)
+        self.assertEqual(how, "file")
+        self.assertTrue(core.in_steam(app, [self.steam]))
+
+    def test_steam_closed_edits_the_file(self):
+        app = self._installed_app()
+        appid, how = core.add_to_steam(app, [self.steam], running=False)
+        self.assertEqual((how, appid), ("file", core.find_shortcut(app.launcher, [self.steam])))
+
+    def test_finish_adds_menu_entry_and_uninstall_removes_it(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        self.assertEqual(app.steam_added, "file")
+        self.assertTrue(core.desktop_entry_path(app).exists())
+        core.uninstall(app, self.paths, roots=[self.steam])
+        self.assertFalse(core.desktop_entry_path(app).exists())
+
+    def test_shortcut_args_and_start_folder_reach_the_launcher(self):
+        lnk = self.tmp / "x.lnk"
+        lnk.write_bytes(make_lnk(r"C:\Program Files\Cool Game\bin\CoolGame.exe",
+                                 args='-skipintro -profile "My Save"', workdir=r"C:\Program Files\Cool Game"))
+        os.environ["FAKE_LNK"] = str(lnk)
+        job = self.job()
+        pending = job.run()
+        top = pending.candidates[0]
+        self.assertEqual(top.args, ["-skipintro", "-profile", "My Save"])
+        app = job.finish(pending, top.exe)
+        self.assertEqual(app.args, ["-skipintro", "-profile", "My Save"])
+        self.assertTrue(app.workdir.endswith("Cool Game"))
+        script = Path(app.launcher).read_text()
+        self.assertIn("CoolGame.exe' -skipintro -profile 'My Save' \"$@\"", script)
+        import shlex
+        self.assertIn(f"cd {shlex.quote(app.workdir)} ", script)
+
+    def test_launcher_restores_hidden_z(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        z = pending.pfx / "dosdevices/z:"
+        z.unlink()
+        z.symlink_to(self.home)  # as if an install was interrupted while Z: pointed at home
+        import subprocess
+        subprocess.run(["bash", app.launcher], env=dict(os.environ), capture_output=True, timeout=30)
+        self.assertEqual(os.readlink(z), "/")
+        log = (self.paths.logs / f"{app.id}-launch.log").read_text()
+        self.assertIn("ProtonLaunch: starting", log)  # each launch leaves a log for troubleshooting
+        self.assertIn("Proton: ", log)
+
+    def test_launcher_explains_missing_proton(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        app.runtime_path = str(self.tmp / "gone/proton")
+        core.write_launcher(app, self.paths, self.steam, [self.steam])
+        import subprocess
+        env = dict(os.environ, HOME=str(self.tmp / "nohome"))
+        r = subprocess.run(["bash", app.launcher], env=env, capture_output=True, timeout=30)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("No Proton found", (self.paths.logs / f"{app.id}-launch.log").read_text())
+
+    def test_installs_keep_the_deck_awake_when_allowed(self):
+        bindir = self.tmp / "inhibit"
+        bindir.mkdir()
+        log = self.tmp / "inhibit.log"
+        fake = bindir / "systemd-inhibit"
+        fake.write_text('#!/bin/bash\necho "$@" >> ' + str(log) + '\n'
+                        'while [[ "$1" == --* ]]; do shift; done\nexec "$@"\n')
+        fake.chmod(0o755)
+        os.environ["PATH"] = f"{bindir}:{os.environ['PATH']}"
+        core._INHIBIT = None
+        try:
+            job = self.job()
+            job.run()
+            job.close()
+        finally:
+            core._INHIBIT = None
+        lines = log.read_text().splitlines()
+        self.assertTrue(any(self.installer.name in line and "--what=sleep:idle" in line for line in lines))
+
+    def test_sleep_inhibitor_not_allowed_means_plain_run(self):
+        bindir = self.tmp / "inhibit"
+        bindir.mkdir()
+        (bindir / "systemd-inhibit").write_text("#!/bin/bash\necho denied >&2; exit 1\n")
+        (bindir / "systemd-inhibit").chmod(0o755)
+        os.environ["PATH"] = f"{bindir}:{os.environ['PATH']}"
+        core._INHIBIT = None
+        try:
+            self.assertEqual(core.sleep_inhibitor(), [])
+            job = self.job()
+            pending = job.run()  # and the install still works
+            job.close()
+            self.assertTrue(pending.candidates)
+        finally:
+            core._INHIBIT = None
+
+    def test_portable_program_folder_is_copied_whole(self):
+        folder = self.home / "Downloads" / "Tool 2.0"
+        (folder / "data").mkdir(parents=True)
+        exe = folder / "Tool.exe"
+        exe.write_bytes(b"MZ")
+        (folder / "tool.dll").write_bytes(b"x")
+        (folder / "data" / "a.pak").write_bytes(b"y")
+        os.environ["FAKE_NOTHING"] = "1"
+        job = core.Installer(exe, self.paths, steam_roots_override=[self.steam])
+        pending = job.run()
+        folder, size = core.portable_folder(pending)
+        self.assertEqual((folder, size), (folder, 4))
+        copied = core.adopt_portable(pending, whole_folder=True)
+        self.assertEqual(copied.name, "Tool.exe")
+        self.assertTrue((copied.parent / "tool.dll").exists())
+        self.assertTrue((copied.parent / "data" / "a.pak").exists())
+        job.close()
+
+    def test_portable_from_downloads_takes_only_the_exe(self):
+        exe = self.home / "Downloads" / "Tool.exe"
+        exe.write_bytes(b"MZ")
+        (self.home / "Downloads" / "unrelated.iso").write_bytes(b"x" * 100)
+        os.environ["FAKE_NOTHING"] = "1"
+        job = core.Installer(exe, self.paths, steam_roots_override=[self.steam])
+        pending = job.run()
+        job.close()
+        self.assertIsNone(core.portable_folder(pending))  # Downloads is shared: never offered
+        copied = core.adopt_portable(pending, whole_folder=True)
+        self.assertEqual(sorted(p.name for p in copied.parent.iterdir()), ["Tool.exe"])
+
+    def test_never_copies_a_folder_holding_protonlaunch_itself(self):
+        os.environ["FAKE_NOTHING"] = "1"
+        job = self.job()  # the installer sits in the folder that also holds ProtonLaunch's data
+        pending = job.run()
+        self.assertIsNone(core.portable_folder(pending))
+        copied = core.adopt_portable(pending, whole_folder=True)
+        names = {p.name for p in copied.parent.iterdir()}
+        self.assertIn(self.installer.name, names)
+        self.assertFalse(names & {"data", "Steam", "home"})  # nothing from around the installer
+        job.close()
+        job.close()
+
+    def test_library_writes_from_two_windows_dont_lose_entries(self):
+        def app(i):
+            return core.App(f"a{i}", f"A{i}", "/x", "/p", "P", "proton", "/r")
+        threads = [threading.Thread(target=lambda i=i: core.Library(self.paths).upsert(app(i))) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(core.Library(self.paths).load()), 20)
+
+    def test_prefers_proton_whose_runtime_is_installed(self):
+        # A newer GE-Proton needing a runtime that isn't installed, next to one that is ready.
+        newer = self.steam / "compatibilitytools.d/GE-Proton99-1"
+        newer.mkdir(parents=True)
+        (newer / "proton").write_text(self.proton.read_text())
+        (newer / "proton").chmod(0o755)
+        (newer / "toolmanifest.vdf").write_text('"manifest" { "require_tool_appid" "9999999" }')
+        job = self.job()
+        pending = job.run()
+        job.close()
+        self.assertEqual(pending.runtime.name, "GE-Proton9-20")
+
+    def test_damaged_library_entry_is_skipped(self):
+        self.paths.root.mkdir(parents=True, exist_ok=True)
+        self.paths.library_file.write_text('[{"id": "broken"}, {"id": "ok", "name": "OK", "exe": "/x", '
+                                           '"prefix": "/p", "runtime_name": "P", "runtime_kind": "proton", '
+                                           '"runtime_path": "/r"}]')
+        self.assertEqual([a.id for a in core.Library(self.paths).load()], ["ok"])
 
     def test_cancel_restores_nothing_left_behind(self):
         os.environ["FAKE_SLEEP"] = "30"

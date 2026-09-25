@@ -82,11 +82,24 @@ class UpdateTests(unittest.TestCase):
         offline = lambda: updater.from_manifest("http://127.0.0.1:9/bin")  # noqa: E731
         u = updater.check("2.1.0", [old_release, broken, offline, dev, main])
         self.assertEqual((u.version, u.notes), ("2.3.0", "Controller fixes"))
-        self.assertTrue(u.url.endswith(f"/main/bin/{updater.ASSET}"))
+        self.assertIn(f"/main/bin/{updater.ASSET}?t=", u.url)  # cache-busted, like latest.json
         self.assertIsNone(updater.check("2.3.0", [old_release, main, dev]))
         errors = []
         self.assertIsNone(updater.check("2.1.0", [broken, offline], errors=errors))
         self.assertEqual(len(errors), 2)  # "couldn't check", not "up to date"
+
+    def test_branch_is_read_at_its_current_commit(self):
+        sha = "ab" * 20
+        (self.web / "api/commits/claude").mkdir(parents=True)
+        (self.web / "api/commits/claude/dev").write_text(sha)  # a branch name with a slash
+        self.publish_branch(sha, "2.6.0")          # what the branch really holds now
+        self.publish_branch("claude/dev", "2.5.0")  # a stale cached view of the branch name
+        u = updater.from_branch("claude/dev", api=f"{self.server.url}/api", raw=self.server.url)
+        self.assertEqual(u.version, "2.6.0")
+        self.assertIn(f"/{sha}/bin/", u.url)
+        # API unavailable (rate-limited, offline): fall back to the branch name.
+        u = updater.from_branch("claude/dev", api=f"{self.server.url}/nope", raw=self.server.url)
+        self.assertEqual(u.version, "2.5.0")
 
     def test_release_source(self):
         u = updater.check("2.1.0", [self.publish_release("v2.5.0")])

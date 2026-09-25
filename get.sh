@@ -16,14 +16,24 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "=== ProtonLaunch Installer ==="
 
-echo "Downloading ProtonLaunch…"
+echo "Looking for the newest ProtonLaunch…"
+BEST_URL="" BEST_VER=""
 for BRANCH in $BRANCHES; do
-  BASE_URL="https://raw.githubusercontent.com/$REPO/$BRANCH/bin"
-  if curl -fsSL -o "$TMP/$ASSET.sha256" "$BASE_URL/$ASSET.sha256" 2>/dev/null; then
-    curl -fL --progress-bar -o "$TMP/$ASSET" "$BASE_URL/$ASSET"
-    break
+  # Read files at the branch's current commit: raw.githubusercontent caches branch names for minutes.
+  REF=$(curl -fsSL -H "Accept: application/vnd.github.sha" "https://api.github.com/repos/$REPO/commits/$BRANCH" 2>/dev/null || true)
+  [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || REF="$BRANCH"
+  URL="https://raw.githubusercontent.com/$REPO/$REF/bin"
+  VER=$(curl -fsSL "$URL/latest.json" 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n 1 || true)
+  [ -n "$VER" ] || continue
+  if [ -z "$BEST_VER" ] || [ "$(printf '%s\n%s\n' "$BEST_VER" "$VER" | sort -V | tail -n 1)" = "$VER" ] && [ "$VER" != "$BEST_VER" ]; then
+    BEST_URL="$URL" BEST_VER="$VER"
   fi
 done
+[ -n "$BEST_URL" ] || { echo "Couldn't reach GitHub — check your internet connection."; exit 1; }
+
+echo "Downloading ProtonLaunch $BEST_VER…"
+curl -fsSL -o "$TMP/$ASSET.sha256" "$BEST_URL/$ASSET.sha256"
+curl -fL --progress-bar -o "$TMP/$ASSET" "$BEST_URL/$ASSET"
 [ -s "$TMP/$ASSET" ] || { echo "Couldn't download ProtonLaunch — check your internet connection."; exit 1; }
 
 echo "Verifying checksum…"

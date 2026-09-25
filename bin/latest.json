@@ -1,5 +1,5 @@
 {
-  "version": "2.3.0",
-  "sha256": "c8666d69b5d55c939906dffc2e084cae5b2509243286e318a119b3b70dc0e7de",
-  "notes": "Uninstall programs from ProtonLaunch (Installed programs)"
+  "version": "2.6.0",
+  "sha256": "f0428a999532772b6e53c4ddb26ad0ac30aeeb47bffe549af7934b3629bd189e",
+  "notes": "More fixes: the D:/Z: drive fix now survives Proton's own setup, waiting for installers and cancelling work inside the Steam Linux Runtime, the Deck stays awake while installing, portable programs can bring their folder, one ProtonLaunch at a time (Open With hands off to the open window), and each launch writes a log for troubleshooting."
 }

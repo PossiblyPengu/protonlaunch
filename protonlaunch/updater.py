@@ -14,6 +14,7 @@ import re
 import ssl
 import sys
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,8 @@ from typing import Callable
 REPO = "PossiblyPengu/protonlaunch"
 BRANCHES = ("main", "claude/steam-deck-windows-install-mkeivr")
 ASSET = "protonlaunch-linux-x86_64"
-RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+API = f"https://api.github.com/repos/{REPO}"
+RELEASE_API = f"{API}/releases/latest"
 RAW = f"https://raw.githubusercontent.com/{REPO}"
 USER_AGENT = "ProtonLaunch-updater"
 
@@ -67,14 +69,19 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
-def _open(url: str, timeout: float):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
+def _open(url: str, timeout: float, headers: dict[str, str] | None = None):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache",
+                                               **(headers or {})})
     ctx = _ssl_context() if url.startswith("https:") else None
-    return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+    except urllib.error.HTTPError as e:
+        e.close()  # an HTTP error still holds the open connection
+        raise UpdateError(f"HTTP {e.code} for {url.split('?')[0]}") from None
 
 
-def fetch(url: str, timeout: float = 8.0, limit: int = 1 << 20) -> bytes:
-    with _open(url, timeout) as r:
+def fetch(url: str, timeout: float = 8.0, limit: int = 1 << 20, headers: dict[str, str] | None = None) -> bytes:
+    with _open(url, timeout, headers) as r:
         return r.read(limit)
 
 
@@ -100,15 +107,34 @@ def from_manifest(base_url: str) -> Update | None:
     """bin/latest.json next to a prebuilt binary: {"version", "sha256", "notes"?}."""
     # The query defeats raw.githubusercontent's ~5 minute cache (including cached 404s).
     data = json.loads(fetch(f"{base_url}/latest.json?t={int(time.time())}"))
-    return Update(str(data["version"]), f"{base_url}/{ASSET}", str(data["sha256"]).lower(),
+    # Same for the binary: a cached older copy would fail the checksum right after a release.
+    return Update(str(data["version"]), f"{base_url}/{ASSET}?t={int(time.time())}", str(data["sha256"]).lower(),
                   str(data.get("notes", ""))[:600], base_url)
+
+
+def from_branch(branch: str, api: str = API, raw: str = RAW) -> Update | None:
+    """bin/latest.json on a branch, read at the branch's current commit.
+
+    raw.githubusercontent caches what a branch name points to for several minutes (query strings
+    don't help), so a fresh release could show up stale or with a mismatched binary. Asking the
+    API for the branch's commit and reading files by commit id is never stale. If the API is
+    unavailable (e.g. rate-limited), the branch name is used as before.
+    """
+    base = f"{raw}/{branch}/bin"
+    try:
+        sha = fetch(f"{api}/commits/{branch}", headers={"Accept": "application/vnd.github.sha"}).decode().strip()
+        if re.fullmatch(r"[0-9a-f]{40}", sha):
+            base = f"{raw}/{sha}/bin"
+    except Exception:  # noqa: BLE001 — fall back to the branch name
+        pass
+    return from_manifest(base)
 
 
 def default_sources() -> list[Callable[[], Update | None]]:
     override = os.environ.get("PROTONLAUNCH_UPDATE_BASE")  # for testing: a folder URL with latest.json
     if override:
         return [lambda: from_manifest(override.rstrip("/"))]
-    return [from_release] + [lambda b=b: from_manifest(f"{RAW}/{b}/bin") for b in BRANCHES]
+    return [from_release] + [lambda b=b: from_branch(b) for b in BRANCHES]
 
 
 def check(current: str, sources: list[Callable[[], Update | None]] | None = None,
@@ -183,11 +209,18 @@ def restart(target: Path, args: list[str] | None = None) -> None:
     os.execve(str(target), [str(target), *(args or [])], restart_env())
 
 
+def why_no_self_update() -> str:
+    if not getattr(sys, "frozen", False):
+        return "This copy runs from source — update it with git pull, or reinstall with get.sh."
+    return (f"ProtonLaunch can't replace its own file in {Path(sys.executable).resolve().parent}. "
+            "Reinstall it with get.sh, which puts it in ~/.local/bin.")
+
+
 def cli_update(current: str, out=print) -> int:
     """`protonlaunch --update` from a terminal."""
     target = self_path()
     if target is None:
-        out("Self-update works for the downloaded app. From a source checkout, use git pull.")
+        out(why_no_self_update())
         return 1
     out(f"ProtonLaunch {current}: checking for updates…")
     errors: list[Exception] = []

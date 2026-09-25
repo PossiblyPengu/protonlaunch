@@ -5,6 +5,8 @@ Nothing in here imports Qt, so it can be tested headless and reused from the CLI
 from __future__ import annotations
 
 import collections
+import contextlib
+import fcntl
 import json
 import mmap
 import os
@@ -175,17 +177,20 @@ def find_runtimes(
         if script.is_file() and key not in found:
             found[key] = Runtime(name=name, kind="proton", path=str(script))
 
+    def children(d: Path) -> list[Path]:
+        try:
+            return sorted(d.iterdir()) if d.is_dir() else []
+        except OSError:  # unreadable or vanished (e.g. an SD card being removed)
+            return []
+
     for d in tool_dirs:
-        if d.is_dir():
-            for sub in sorted(d.iterdir()):
-                add(sub / "proton", sub.name)
+        for sub in children(d):
+            add(sub / "proton", sub.name)
     for root in roots:
         for lib in steam_library_dirs(root):
-            common = lib / "steamapps/common"
-            if common.is_dir():
-                for sub in sorted(common.iterdir()):
-                    if "proton" in sub.name.lower():
-                        add(sub / "proton", sub.name)
+            for sub in children(lib / "steamapps/common"):
+                if "proton" in sub.name.lower():
+                    add(sub / "proton", sub.name)
 
     runtimes = list(found.values())
     if include_system_wine:
@@ -292,35 +297,81 @@ def slugify(name: str) -> str:
 # ── Windows shortcuts (.lnk) ─────────────────────────────────────────────────
 
 
-def lnk_target(data: bytes) -> str | None:
-    """Windows path a .lnk points at (from its LinkInfo block), or None."""
+@dataclass
+class LnkInfo:
+    target: str | None = None  # absolute Windows path (LinkInfo)
+    relative: str | None = None  # path relative to the .lnk file (StringData)
+    workdir: str | None = None
+    args: str = ""
+
+
+def lnk_info(data: bytes) -> LnkInfo | None:
+    """Where a Windows .lnk points, plus its arguments and working folder. None if not a .lnk."""
     if len(data) < 0x4C or data[:4] != b"L\x00\x00\x00":
         return None
+    info = LnkInfo()
     try:
         (flags,) = struct.unpack_from("<I", data, 0x14)
         pos = 0x4C
         if flags & 0x01:  # HasLinkTargetIDList
             (idl_size,) = struct.unpack_from("<H", data, pos)
             pos += 2 + idl_size
-        if not flags & 0x02:  # HasLinkInfo
-            return None
-        li = pos
-        _size, header_size, li_flags, _vol, base_off = struct.unpack_from("<5I", data, li)
-        if not li_flags & 0x01:  # VolumeIDAndLocalBasePath
-            return None
-        if header_size >= 0x24:
-            (ubase_off,) = struct.unpack_from("<I", data, li + 0x1C)
-            if ubase_off:
-                start = li + ubase_off
-                end = start
-                while end + 1 < len(data) and data[end:end + 2] != b"\x00\x00":
-                    end += 2
-                return data[start:end].decode("utf-16-le", errors="replace") or None
-        start = li + base_off
-        end = data.index(b"\x00", start)
-        return data[start:end].decode("cp1252", errors="replace") or None
+        if flags & 0x02:  # HasLinkInfo
+            li = pos
+            li_size, header_size, li_flags, _vol, base_off = struct.unpack_from("<5I", data, li)
+            if li_flags & 0x01:  # VolumeIDAndLocalBasePath
+                if header_size >= 0x24 and struct.unpack_from("<I", data, li + 0x1C)[0]:
+                    start = li + struct.unpack_from("<I", data, li + 0x1C)[0]
+                    end = start
+                    while end + 1 < len(data) and data[end:end + 2] != b"\x00\x00":
+                        end += 2
+                    info.target = data[start:end].decode("utf-16-le", errors="replace") or None
+                else:
+                    start = li + base_off
+                    end = data.index(b"\x00", start)
+                    info.target = data[start:end].decode("cp1252", errors="replace") or None
+            pos = li + li_size
+        # StringData: name, relative path, working dir, arguments, icon — each only if its flag is set.
+        unicode = bool(flags & 0x80)
+        strings = {}
+        for bit, key in ((0x04, "name"), (0x08, "relative"), (0x10, "workdir"), (0x20, "args")):
+            if not flags & bit:
+                continue
+            (count,) = struct.unpack_from("<H", data, pos)
+            pos += 2
+            size = count * 2 if unicode else count
+            raw = data[pos:pos + size]
+            pos += size
+            strings[key] = raw.decode("utf-16-le" if unicode else "cp1252", errors="replace")
+        info.relative = strings.get("relative") or None
+        info.workdir = strings.get("workdir") or None
+        info.args = strings.get("args", "").strip()
     except (struct.error, ValueError):
-        return None
+        pass
+    return info if (info.target or info.relative) else None
+
+
+def lnk_target(data: bytes) -> str | None:
+    """Windows path a .lnk points at (from its LinkInfo block), or None."""
+    info = lnk_info(data)
+    return info.target if info else None
+
+
+def split_windows_args(cmdline: str) -> list[str]:
+    """Split a Windows command line the way programs parse it (quotes group, backslashes kept)."""
+    out, cur, quoted, have = [], [], False, False
+    for ch in cmdline:
+        if ch == '"':
+            quoted, have = not quoted, True
+        elif ch in " \t" and not quoted:
+            if cur or have:
+                out.append("".join(cur))
+            cur, have = [], False
+        else:
+            cur.append(ch)
+    if cur or have:
+        out.append("".join(cur))
+    return out
 
 
 def windows_to_unix(pfx: Path, win_path: str) -> Path | None:
@@ -370,6 +421,8 @@ class Candidate:
     exe: Path
     score: float
     shortcut_name: str | None = None
+    args: list[str] = field(default_factory=list)  # from the program's shortcut
+    workdir: Path | None = None  # the shortcut's "Start in" folder
 
 
 def _start_menu_and_desktop_dirs(drive_c: Path) -> list[tuple[Path, int]]:
@@ -503,21 +556,26 @@ def find_program(
     for d, bonus in _start_menu_and_desktop_dirs(drive_c):
         if not d.is_dir():
             continue
-        for lnk in d.rglob("*.lnk"):
-            if any(w in lnk.stem.lower() for w in _BAD_LNK_WORDS):
+        for lnk in d.rglob("*"):
+            if lnk.suffix.lower() != ".lnk" or any(w in lnk.stem.lower() for w in _BAD_LNK_WORDS):
                 continue
             try:
-                target = lnk_target(lnk.read_bytes())
+                info = lnk_info(lnk.read_bytes())
             except OSError:
                 continue
-            if not target or not target.lower().endswith(".exe"):
+            if info is None:
                 continue
-            exe = windows_to_unix(pfx, target)
-            if exe is None or not exe.is_file():
+            exe = windows_to_unix(pfx, info.target) if info.target else None
+            if exe is None and info.relative:  # no absolute path: resolve next to the .lnk file
+                exe = (lnk.parent / info.relative.replace("\\", "/")).resolve()
+            if exe is None or exe.suffix.lower() != ".exe" or not exe.is_file():
                 continue
             c = cand(exe)
             if c.shortcut_name is None or bonus > 100:
                 c.shortcut_name = lnk.stem
+                c.args = split_windows_args(info.args) if info.args else []
+                wd = windows_to_unix(pfx, info.workdir) if info.workdir else None
+                c.workdir = wd if wd is not None and wd.is_dir() else None
             c.score += bonus
 
     if installer is not None:
@@ -738,6 +796,9 @@ class App:
     icon: str = ""  # PNG extracted from the program's .exe
     artwork: list[str] = field(default_factory=list)  # Steam library images we generated
     extra_dirs: list[str] = field(default_factory=list)  # program folder outside C: (installed to D:)
+    steam_added: str = ""  # how it got into Steam: "live" (Steam confirmed), "file", or "" (not added)
+    args: list[str] = field(default_factory=list)  # arguments from the program's own shortcut
+    workdir: str = ""  # folder to start in ("" = the program's folder)
 
     @property
     def runtime(self) -> Runtime:
@@ -754,21 +815,40 @@ class Library:
         except (OSError, ValueError):
             return []
         known = set(App.__dataclass_fields__)
-        return [App(**{k: v for k, v in item.items() if k in known}) for item in raw if isinstance(item, dict)]
+        apps = []
+        for item in raw if isinstance(raw, list) else []:
+            try:
+                apps.append(App(**{k: v for k, v in item.items() if k in known}))
+            except (TypeError, AttributeError):  # a damaged entry shouldn't stop the app from starting
+                continue
+        return apps
 
     def save(self, apps: list[App]) -> None:
         self.paths.root.mkdir(parents=True, exist_ok=True)
-        tmp = self.paths.library_file.with_suffix(".tmp")
+        tmp = self.paths.library_file.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps([asdict(a) for a in apps], indent=2), encoding="utf-8")
         os.replace(tmp, self.paths.library_file)
 
+    @contextlib.contextmanager
+    def _locked(self):
+        """One writer at a time, even across two ProtonLaunch windows."""
+        self.paths.root.mkdir(parents=True, exist_ok=True)
+        with open(self.paths.root / "library.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
     def upsert(self, app: App) -> None:
-        apps = [a for a in self.load() if a.id != app.id]
-        apps.append(app)
-        self.save(apps)
+        with self._locked():
+            apps = [a for a in self.load() if a.id != app.id]
+            apps.append(app)
+            self.save(apps)
 
     def remove(self, app_id: str) -> None:
-        self.save([a for a in self.load() if a.id != app_id])
+        with self._locked():
+            self.save([a for a in self.load() if a.id != app_id])
 
     def unique_id(self, name: str) -> str:
         base = slugify(name)
@@ -808,27 +888,54 @@ def runtime_env(
     return env
 
 
-def run_command(rt: Runtime, target: str | Path, *extra: str, entry: Path | None = None) -> list[str]:
+def run_command(rt: Runtime, target: str | Path, *extra: str, entry: Path | None = None,
+                verb: str | None = None) -> list[str]:
     """Command line that runs a Windows .exe/.msi (unix or Windows path) under the runtime.
 
     With `entry` (a Steam Linux Runtime entry point) Proton runs inside the container, exactly
-    as Steam launches games.
+    as Steam launches games. `verb` is Proton's: "run", or "waitforexitandrun" (first wait until
+    everything already running in the prefix has exited).
     """
     target = str(target)
     args = ["msiexec", "/i", target] if target.lower().endswith(".msi") else [target, *extra]
     if not rt.is_proton:
         return [rt.path, *args]
     if entry is not None:
-        return [str(entry), "--verb=waitforexitandrun", "--", rt.path, "waitforexitandrun", *args]
-    return [rt.path, "run", *args]
+        verb = verb or "waitforexitandrun"
+        return [str(entry), f"--verb={verb}", "--", rt.path, verb, *args]
+    return [rt.path, verb or "run", *args]
+
+
+_INHIBIT: list[str] | None = None
+
+
+def sleep_inhibitor() -> list[str]:
+    """A systemd-inhibit prefix that keeps the Deck awake during a long install ([] if not allowed).
+
+    Checked once with a harmless command, so an install never fails because inhibiting did."""
+    global _INHIBIT
+    if _INHIBIT is None:
+        exe = shutil.which("systemd-inhibit")
+        cmd = [exe, "--what=sleep:idle", "--who=ProtonLaunch", "--why=Installing a Windows program",
+               "--mode=block"] if exe else []
+        if cmd:
+            try:
+                ok = subprocess.run([*cmd, "true"], env=clean_env(), timeout=5, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL).returncode == 0
+            except (OSError, subprocess.TimeoutExpired):
+                ok = False
+            cmd = cmd if ok else []
+        _INHIBIT = cmd
+    return list(_INHIBIT)
 
 
 # ── Drive letters ────────────────────────────────────────────────────────────
 #
 # Proton maps only C: (the prefix) and Z: (the whole filesystem, "/"). On SteamOS "/" is the
 # small read-only system partition ("rootfs"), so installers that look at Z: — or that default
-# to the drive they were started from — report "not enough space". While installing we hide Z:,
-# expose the home folder (where the free space is) as D:, and start the installer from there.
+# to the drive they were started from — report "not enough space". While installing we point Z:
+# at the home folder (where the free space is; Proton recreates a *missing* Z: every launch, so
+# it can't simply be removed), expose the home folder as D:, and start the installer from there.
 
 HOME_DRIVE = "d"
 INSTALLER_DRIVE = "e"  # only used when the installer lives outside the home folder
@@ -853,13 +960,14 @@ def to_windows_path(letter: str, root: Path, path: Path) -> str:
     return f"{letter.upper()}:\\" + "\\".join(rel.parts)
 
 
-def hide_system_drive(pfx: Path) -> str | None:
-    """Remove Z: for the duration of an install. Returns its old target for restore_system_drive."""
+def hide_system_drive(pfx: Path, replacement: Path) -> str | None:
+    """Point Z: at `replacement` for the duration of an install. Returns its old target."""
     z = _dosdevices(pfx) / "z:"
     if not z.is_symlink():
         return None
     target = os.readlink(z)
     z.unlink()
+    os.symlink(str(replacement), z)
     return target
 
 
@@ -867,8 +975,11 @@ def restore_system_drive(pfx: Path, target: str | None) -> None:
     if target is None:
         return
     z = _dosdevices(pfx) / "z:"
-    if not z.is_symlink() and not z.exists():
-        os.symlink(target, z)
+    if z.is_symlink() and os.readlink(z) == target:
+        return
+    if z.is_symlink() or z.exists():
+        z.unlink()
+    os.symlink(target, z)
 
 
 def free_space(path: Path) -> int:
@@ -902,15 +1013,27 @@ def write_launcher(
     script = paths.launchers / f"{app.id}.sh"
     compat = Path(app.prefix)
     q = shlex.quote
+    workdir = app.workdir if app.workdir and Path(app.workdir).is_dir() else str(Path(app.exe).parent)
+    run = " ".join([q(app.exe), *(q(a) for a in app.args), '"$@"'])
     lines = [
         "#!/bin/bash",
         "# ProtonLaunch launcher for " + " ".join(app.name.split()),
         f"export WINEPREFIX={q(str(compat / 'pfx'))}",
-        f"cd {q(str(Path(app.exe).parent))} || exit 1",
+        f"LOG={q(str(paths.logs / (app.id + '-launch.log')))}",
+        '{ mkdir -p "$(dirname "$LOG")" && exec >"$LOG" 2>&1; } || true  # last launch only, for troubleshooting',
+        'echo "ProtonLaunch: starting $(date)"',
+        "# Z: points at the home folder while installing; put it back if an install was interrupted.",
+        '[ "$(readlink "$WINEPREFIX/dosdevices/z:")" = / ] || ln -sfn / "$WINEPREFIX/dosdevices/z:"',
+        f"cd {q(workdir)} || cd {q(str(Path(app.exe).parent))} || exit 1",
     ]
     if app.runtime_kind == "proton":
         client = str(steam_root or Path.home() / ".steam/steam")
         entry = container_entry_point(Path(app.runtime_path), roots)
+        home = Path.home().resolve()
+        mounts = sorted({str(p) for p in (compat, Path(app.exe).parent, Path(workdir))
+                         if not p.resolve().is_relative_to(home)})
+        if mounts:  # the Steam Linux Runtime only sees the home folder unless told otherwise
+            lines.append(f"export STEAM_COMPAT_MOUNTS={q(':'.join(mounts))}")
         lines += [
             f"export STEAM_COMPAT_DATA_PATH={q(str(compat))}",
             'export SteamAppId="${SteamAppId:-0}" SteamGameId="${SteamGameId:-0}"',
@@ -922,15 +1045,17 @@ def write_launcher(
             '"$HOME"/.local/share/Steam/compatibilitytools.d/*/proton '
             '"$HOME"/.local/share/Steam/steamapps/common/Proton*/proton 2>/dev/null | sort -V | tail -n 1)',
             "fi",
+            'if [ -z "$PROTON" ]; then echo "No Proton found. Install Proton Experimental from Steam."; exit 1; fi',
+            'echo "Proton: $PROTON"',
             'export STEAM_COMPAT_TOOL_PATHS="$(dirname "$PROTON")"',
             f"ENTRY={q(str(entry or ''))}",
             'if [ -n "$ENTRY" ] && [ -x "$ENTRY" ] && [ -z "$PROTONLAUNCH_NO_CONTAINER" ]; then',
-            f'  exec "$ENTRY" --verb=waitforexitandrun -- "$PROTON" waitforexitandrun {q(app.exe)} "$@"',
+            f'  exec "$ENTRY" --verb=waitforexitandrun -- "$PROTON" waitforexitandrun {run}',
             "fi",
-            f'exec "$PROTON" run {q(app.exe)} "$@"',
+            f'exec "$PROTON" run {run}',
         ]
     else:
-        lines.append(f'exec {q(app.runtime_path)} {q(app.exe)} "$@"')
+        lines.append(f'exec {q(app.runtime_path)} {run}')
     script.write_text("\n".join(lines) + "\n", encoding="utf-8")
     script.chmod(0o755)
     return script
@@ -1034,9 +1159,16 @@ class Installer:
 
     def _kill_wine(self) -> None:
         ws = self.runtime.wineserver() if self.runtime else None
-        if ws and self._env:
-            subprocess.run([ws, "-k"], env=self._env, timeout=30, check=False,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmds = [[ws, "-k"]] if ws else []
+        if self.runtime is not None and self.runtime.is_proton and self.entry is not None:
+            # The container's Wine may not be reachable from outside: end its processes from inside.
+            cmds.append(run_command(self.runtime, "wineboot.exe", "-k", entry=self.entry, verb="run"))
+        for cmd in cmds if self._env else []:
+            try:
+                subprocess.run(cmd, env=self._env, timeout=60, check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         with self._lock:
             proc = self._proc
         if proc and proc.poll() is None:
@@ -1044,6 +1176,18 @@ class Installer:
                 os.killpg(proc.pid, signal.SIGTERM)
             except OSError:
                 pass
+
+    def _wait_for_wine(self, ws: str | None, inhibit: bool = False) -> None:
+        """Block until every Windows process in the prefix has exited (installers often hand off
+        to a second process and exit early)."""
+        pre = sleep_inhibitor() if inhibit else []
+        if self.runtime is not None and self.runtime.is_proton:
+            # Proton's waitforexitandrun waits for the prefix's Wine where it runs (inside the
+            # container, which the outside may not be able to see), then runs a no-op.
+            self._stream(pre + run_command(self.runtime, "cmd.exe", "/c", "exit", entry=self.entry,
+                                           verb="waitforexitandrun"))
+        if ws and not self._skip_wait:
+            self._stream([ws, "-w"])  # and the no-op's own short-lived Wine
 
     def cancel(self) -> None:
         """Abort: close every window of the installer and throw the prefix away."""
@@ -1066,7 +1210,11 @@ class Installer:
             runtimes = find_runtimes(self._roots)
             if not runtimes:
                 raise InstallError("NO_RUNTIME")
-            self.runtime = runtimes[0]
+            # The best Proton that can run the way Steam runs it (its Steam Linux Runtime is
+            # installed); only if none can does the user get asked to download a runtime.
+            ready = [r for r in runtimes if not r.is_proton or not required_container_appid(Path(r.path))
+                     or container_entry_point(Path(r.path), self._roots)]
+            self.runtime = (ready or runtimes)[0]
 
         if self.runtime.is_proton and not self.allow_no_container:
             need = required_container_appid(Path(self.runtime.path))
@@ -1098,8 +1246,7 @@ class Installer:
             # 1. Create the Windows environment first, so its drives can be adjusted.
             self._set("prepare", "Setting up Windows… (takes a minute the first time)")
             self._stream(run_command(self.runtime, "cmd.exe", "/c", "exit", entry=self.entry))
-            if ws:
-                self._stream([ws, "-w"])
+            self._wait_for_wine(ws)
             if self._cancelled:
                 raise Cancelled()
             if not (pfx / "system.reg").exists():
@@ -1115,22 +1262,22 @@ class Installer:
             except ValueError:
                 map_drive(pfx, INSTALLER_DRIVE, self.installer.parent)
                 target = to_windows_path(INSTALLER_DRIVE, self.installer.parent, self.installer)
-            hidden_z = hide_system_drive(pfx)
+            hidden_z = hide_system_drive(pfx, home)
             self._log(f"Drives: C: = {pfx / 'drive_c'} ({human_size(free_space(pfx))} free), "
-                      f"D: = {home} ({human_size(free_space(home))} free); Z: hidden")
+                      f"D: and Z: = {home} ({human_size(free_space(home))} free) while installing")
             home_before = snapshot_dirs(home)
 
             # 3. Run the installer.
             self._set("installer", "Running the installer — follow the steps on screen.\n"
                       f"Install to C: or D: (both have {human_size(free_space(home))} free).")
-            rc = self._stream(run_command(self.runtime, target, entry=self.entry))
+            rc = self._stream(sleep_inhibitor() + run_command(self.runtime, target, entry=self.entry))
             self._log(f"Installer exited with code {rc}")
             if self._cancelled:
                 raise Cancelled()
 
-            if ws and not self._skip_wait:
+            if not self._skip_wait:
                 self._set("wait", "Waiting for the installer's windows to close…")
-                self._stream([ws, "-w"])
+                self._wait_for_wine(ws, inhibit=True)
             if self._cancelled:
                 raise Cancelled()
             restore_system_drive(pfx, hidden_z)
@@ -1180,26 +1327,60 @@ class Installer:
             icon=icon,
         )
         app.extra_dirs = [str(d) for d in program_dirs(Path(app.exe), pending.new_dirs)]
+        chosen = next((c for c in pending.candidates if c.exe.resolve() == Path(app.exe)), None)
+        if chosen is not None:
+            app.args = list(chosen.args)
+            app.workdir = str(chosen.workdir) if chosen.workdir else ""
         launcher = write_launcher(app, self.paths, self.steam_root, self._roots)
         app.launcher = str(launcher)
-        app.steam_appid, users = add_steam_shortcut(
-            app.name, str(launcher), str(Path(app.exe).parent), icon=icon, roots=self._roots
-        )
-        if not users:
-            app.steam_appid = 0
+        write_desktop_entry(app)
+        app.steam_appid, app.steam_added = add_to_steam(app, self._roots)
         self.library.upsert(app)
-        self._log(f"Installed '{app.name}' → {app.exe} (Steam users updated: {users})")
+        self._log(f"Installed '{app.name}' → {app.exe} (Steam: {app.steam_added or 'not added'})")
         self.close()
         return app
 
 
-def adopt_portable(pending: PendingInstall) -> Path:
-    """For a program that needs no installing: copy it into the prefix and use it directly."""
-    dest_dir = pending.pfx / "drive_c/Program Files" / pending.name
+def _shared_folder(folder: Path) -> bool:
+    """A folder that holds unrelated things (Downloads, Desktop, a drive's root…), not one program."""
+    home = Path.home().resolve()
+    f = folder.resolve()
+    return (f in (home, Path("/")) or f in removable_media() or f.parent == Path("/run/media")
+            or (f.parent == home and f.name.lower() in _PROTECTED_HOME_DIRS | _GENERIC_FOLDERS))
+
+
+def portable_folder(pending: PendingInstall) -> tuple[Path, int] | None:
+    """The program's own folder with other files in it, if copying it along is worth offering.
+
+    Portable programs usually need the files next to them. Never offered for shared folders
+    (Downloads, Desktop, a drive's root…) or a folder that contains ProtonLaunch's own data."""
+    folder = pending.installer.parent
+    if _shared_folder(folder) or pending.compat_dir.resolve().is_relative_to(folder.resolve()):
+        return None
+    try:
+        if not any(p != pending.installer for p in folder.iterdir()):
+            return None
+    except OSError:
+        return None
+    return folder, dir_size(folder)
+
+
+def adopt_portable(pending: PendingInstall, whole_folder: bool = False) -> Path:
+    """For a program that needs no installing: copy it into the prefix and use it from there —
+    just the .exe, or (whole_folder, when portable_folder offers it) its folder with it."""
+    folder = re.sub(r'[\\/:*?"<>|]+', " ", pending.name).strip() or "Program"
+    dest_dir = pending.pfx / "drive_c/Program Files" / folder
+    src = pending.installer
+    offer = portable_folder(pending) if whole_folder else None
+    if offer is not None:
+        _src_dir, need = offer
+        if need > free_space(pending.pfx):
+            raise InstallError(f"Not enough free space to copy {src.parent.name} ({human_size(need)}).")
+        shutil.copytree(src.parent, dest_dir, symlinks=True, dirs_exist_ok=True)
+        return dest_dir / src.name
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / pending.installer.name
-    shutil.copy2(pending.installer, dest)
-    return dest
+    shutil.copy2(src, dest_dir / src.name)
+    return dest_dir / src.name
 
 
 def best_name(pending: PendingInstall, chosen: Candidate | None) -> str:
@@ -1287,19 +1468,132 @@ def app_size(app: App) -> int:
     return sum(dir_size(p) for p in app_paths(app))
 
 
-def in_steam(app: App, roots: Iterable[Path] | None = None) -> bool:
-    """Is the program's shortcut still in any Steam user's library?"""
-    if not app.steam_appid:
-        return False
+def find_shortcut(launcher: str, roots: Iterable[Path] | None = None, appid: int = 0) -> int:
+    """The appid of the Steam shortcut that runs `launcher` (or has `appid`), or 0 if there is none."""
     for cfg in steam_user_config_dirs(roots):
-        f = cfg / "shortcuts.vdf"
         try:
-            sc = vdf_loads(f.read_bytes()).get("shortcuts", {})
+            sc = vdf_loads((cfg / "shortcuts.vdf").read_bytes()).get("shortcuts", {})
         except (OSError, ValueError):
             continue
-        if any(_entry_appid(e) == app.steam_appid for e in sc.values() if isinstance(e, dict)):
-            return True
+        for e in sc.values():
+            if not isinstance(e, dict):
+                continue
+            aid = _entry_appid(e)
+            if (appid and aid == appid) or (launcher and launcher in str(e.get("Exe", ""))):
+                return aid
+    return 0
+
+
+def in_steam(app: App, roots: Iterable[Path] | None = None) -> bool:
+    """Is the program's shortcut in any Steam user's library?"""
+    return bool(find_shortcut(app.launcher, roots, app.steam_appid))
+
+
+# ── Adding to Steam ──────────────────────────────────────────────────────────
+#
+# Steam keeps its shortcuts in memory and writes shortcuts.vdf back when it exits, so editing the
+# file while Steam runs is undone by the next restart. While Steam is running we therefore ask
+# Steam itself to add the program (steam://addnonsteamgame/<.desktop file>, what SteamOS's own
+# "Add to Steam" does) and check that it landed; the file is only edited when Steam is closed, or
+# as a last resort.
+
+def desktop_entry_path(app: App) -> Path:
+    base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    return base / "applications" / f"protonlaunch-{app.id}.desktop"
+
+
+def write_desktop_file(path: Path, name: str, exe: str, workdir: str, icon: str,
+                       comment: str = "Windows program installed with ProtonLaunch") -> Path:
+    def esc(v: str) -> str:
+        return v.replace("\\", "\\\\").replace("\n", " ")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={esc(' '.join(name.split()))}\n"
+        f"Comment={comment}\n"
+        f'Exec="{exe.replace(chr(34), chr(92) + chr(34))}"\n'
+        f"Path={esc(workdir)}\n"
+        f"Icon={esc(icon or 'applications-games')}\n"
+        "Terminal=false\n"
+        "Categories=Game;\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+def write_desktop_entry(app: App) -> Path:
+    """A menu entry (Desktop Mode app menu → Games). Also what Steam's add-a-game handoff reads."""
+    return write_desktop_file(desktop_entry_path(app), app.name, app.launcher, str(Path(app.exe).parent), app.icon)
+
+
+def remove_desktop_entry(app: App) -> None:
+    try:
+        desktop_entry_path(app).unlink()
+    except OSError:
+        pass
+
+
+def request_steam_add(desktop_file: Path) -> bool:
+    """Hand a .desktop file to the running Steam client. True if the request was delivered."""
+    import urllib.parse
+
+    tmp = Path("/tmp") / desktop_file.name
+    try:
+        shutil.copy2(desktop_file, tmp)
+        Path("/tmp/addnonsteamgamefile").touch()  # SteamOS's add-to-steam sets this flag too
+    except OSError:
+        tmp = desktop_file
+    url = "steam://addnonsteamgame/" + urllib.parse.quote(str(tmp), safe="")
+    for cmd in (["steam", url], ["xdg-open", url]):
+        exe = shutil.which(cmd[0])
+        if not exe:
+            continue
+        try:
+            proc = subprocess.Popen([exe, *cmd[1:]], env=clean_env(), start_new_session=True,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+        except OSError:
+            continue
+        try:
+            proc.wait(timeout=10)  # `steam <url>` just hands the URL to the running client and exits
+        except subprocess.TimeoutExpired:
+            pass
+        return True
     return False
+
+
+def add_shortcut(name: str, exe: str, start_dir: str, icon: str = "", desktop_file: Path | None = None,
+                 roots: Iterable[Path] | None = None, running: bool | None = None,
+                 wait: float = 12.0) -> tuple[int, str]:
+    """Add a non-Steam shortcut. Returns (appid, how): how is "live" when the running Steam
+    confirmed it, "file" when shortcuts.vdf was edited, "" when there's no Steam account."""
+    roots = list(steam_roots() if roots is None else roots)
+    if running is None:
+        running = steam_is_running()
+    if running and exe:
+        if desktop_file is None or not desktop_file.exists():
+            desktop_file = write_desktop_file(Path("/tmp") / f"protonlaunch-{slugify(name)}.desktop",
+                                              name, exe, start_dir, icon)
+        if request_steam_add(desktop_file):
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                appid = find_shortcut(exe, roots)
+                if appid:
+                    return appid, "live"
+                time.sleep(0.3)
+    appid, users = add_steam_shortcut(name, exe, start_dir, icon=icon, roots=roots)
+    return (appid, "file") if users else (0, "")
+
+
+def add_to_steam(app: App, roots: Iterable[Path] | None = None, running: bool | None = None,
+                 wait: float = 12.0) -> tuple[int, str]:
+    """Add an installed program to Steam (see add_shortcut)."""
+    entry = desktop_entry_path(app)
+    if app.launcher and not entry.exists():
+        entry = write_desktop_entry(app)
+    return add_shortcut(app.name, app.launcher, str(Path(app.exe).parent), app.icon, entry, roots, running, wait)
 
 
 def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None) -> None:
@@ -1307,6 +1601,7 @@ def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None) -> No
     its Steam shortcut, icon, artwork, launcher and log."""
     if app.steam_appid:
         remove_steam_shortcut(app.steam_appid, roots)
+    remove_desktop_entry(app)
     for d in safe_extra_dirs(app):
         shutil.rmtree(d, ignore_errors=True)
     shutil.rmtree(app.prefix, ignore_errors=True)

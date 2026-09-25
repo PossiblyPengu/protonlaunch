@@ -3,15 +3,15 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer
+from PyQt6.QtCore import QEvent, QEventLoop, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
-    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -86,6 +86,7 @@ class Tile(QPushButton):
         self.title, self.subtitle, self.icon, self.glyph = title, subtitle, icon, glyph
         self.color = color or artwork.accent_color(title, icon)
         self.setFixedSize(self.W, self.H)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)  # repaint on mouse hover, not just focus
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(title)
@@ -207,19 +208,26 @@ class HintBar(QFrame):
         self.left.setText(note)
 
 
-class Sheet(QDialog):
-    """A full-window, controller-friendly dialog with big buttons. exec() returns the button index."""
+class Sheet(QWidget):
+    """A controller-friendly dialog with big buttons, drawn over the window. exec() returns the
+    chosen button's index (-1 for Back/Esc).
+
+    It's an overlay inside the main window rather than a separate dialog window: in Game Mode
+    gamescope shows one window at a time, so a separate dialog could appear on a black screen.
+    """
+
+    current: "Sheet | None" = None  # the sheet on top, if any
 
     def __init__(self, parent: QWidget, title: str, text: str = "", buttons: tuple[str, ...] = ("OK",),
                  primary: int = 0, danger: tuple[int, ...] = (), detail: str = ""):
-        super().__init__(parent.window())
-        self.choice = -1
-        self.setObjectName("sheet")
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setModal(True)
         top = parent.window()
-        self.setGeometry(top.geometry())
+        super().__init__(top)
+        self.top = top
+        self.choice = -1
+        self.primary = primary
+        self._loop: QEventLoop | None = None
+        self.setObjectName("sheet")
+        self.setGeometry(top.rect())
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -232,6 +240,7 @@ class Sheet(QDialog):
                            " border-radius: 18px; }")
         card.setMinimumWidth(min(760, top.width() - 80))
         card.setMaximumWidth(min(980, top.width() - 40))
+        card.setMaximumHeight(max(300, top.height() - 40))
         lay = QVBoxLayout(card)
         lay.setContentsMargins(36, 30, 36, 30)
         lay.setSpacing(16)
@@ -241,7 +250,7 @@ class Sheet(QDialog):
         if detail:
             box = QPlainTextEdit(detail)
             box.setReadOnly(True)
-            box.setMinimumHeight(320)
+            box.setMinimumHeight(min(320, max(120, top.height() - 420)))
             lay.addWidget(box, 1)
         menu = len(buttons) > 3  # a list of choices: stack them, D-pad up/down
         btns = QVBoxLayout() if menu else QHBoxLayout()
@@ -260,12 +269,52 @@ class Sheet(QDialog):
         row.addStretch(1)
         outer.addLayout(row)
         outer.addStretch(1)
+        self.hide()
+
+    def exec(self) -> int:
+        """Show over the window and wait for a choice; everything underneath is disabled meanwhile."""
+        from PyQt6.QtWidgets import QApplication, QMainWindow
+
+        prev_focus = QApplication.focusWidget()
+        prev_sheet = Sheet.current
+        blocked = [w for w in (self.top.centralWidget() if isinstance(self.top, QMainWindow) else None,
+                               prev_sheet) if w is not None and w.isEnabled()]
+        for w in blocked:
+            w.setEnabled(False)
+        Sheet.current = self
+        self.top.installEventFilter(self)
+        self.setGeometry(self.top.rect())
+        self.show()
+        self.raise_()
         if self.buttons:
-            QTimer.singleShot(0, self.buttons[primary].setFocus)
+            self.buttons[self.primary].setFocus()
+        self._loop = QEventLoop()
+        self._loop.exec()
+        self.top.removeEventFilter(self)
+        for w in blocked:
+            w.setEnabled(True)
+        Sheet.current = prev_sheet
+        self.hide()
+        self.deleteLater()
+        try:
+            if prev_focus is not None and prev_focus.isVisible() and prev_focus.isEnabled():
+                prev_focus.setFocus()
+        except RuntimeError:  # the widget that had focus was deleted meanwhile
+            pass
+        return self.choice
 
     def _pick(self, i: int) -> None:
         self.choice = i
-        self.accept()
+        if self._loop is not None:
+            self._loop.quit()
+
+    def reject(self) -> None:
+        self._pick(-1)
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 — keep covering the window when it resizes
+        if obj is self.top and ev.type() == QEvent.Type.Resize:
+            self.setGeometry(self.top.rect())
+        return False
 
     def paintEvent(self, _e) -> None:  # noqa: N802
         p = QPainter(self)
@@ -274,7 +323,6 @@ class Sheet(QDialog):
 
     def keyPressEvent(self, e) -> None:  # noqa: N802
         if e.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Back):
-            self.choice = -1
             self.reject()
             return
         super().keyPressEvent(e)
@@ -282,9 +330,42 @@ class Sheet(QDialog):
     # Tests replace this to answer without a modal loop.
     @staticmethod
     def ask(parent: QWidget, title: str, text: str = "", buttons: tuple[str, ...] = ("OK",), **kw) -> int:
-        s = Sheet(parent, title, text, buttons, **kw)
-        s.exec()
-        return s.choice
+        return Sheet(parent, title, text, buttons, **kw).exec()
+
+
+class ElideLabel(QLabel):
+    """One line of text that shortens itself with "…" instead of widening the window
+    (a long file path must never push buttons off the Deck's screen)."""
+
+    def __init__(self, text: str = "", obj: str = "", mode: Qt.TextElideMode = Qt.TextElideMode.ElideMiddle):
+        super().__init__()
+        if obj:
+            self.setObjectName(obj)
+        self.mode = mode
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(10)
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full = text
+        self.setToolTip(text)
+        self._elide()
+
+    def text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, e) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._elide()
+
+    def _elide(self) -> None:
+        super().setText(self.fontMetrics().elidedText(self._full, self.mode, max(10, self.width())))
+
+
+def breakable(path: object) -> str:
+    """A path that word-wrap can break after its slashes (zero-width spaces)."""
+    return str(path).replace("/", "/\u200b")
 
 
 class Steps(QWidget):

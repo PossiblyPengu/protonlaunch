@@ -71,10 +71,10 @@ def nearest(cur: QRect, cands: list[tuple[QWidget, QRect]], d: str) -> QWidget |
 
 
 class GamepadThread(QThread):
-    action = pyqtSignal(str, bool)
+    action = pyqtSignal(str, bool, str)  # action, pressed, device
 
     def run(self) -> None:
-        gamepad.read_loop(lambda a, p: self.action.emit(a, p), self.isInterruptionRequested)
+        gamepad.read_loop(lambda a, p, dev="": self.action.emit(a, p, dev), self.isInterruptionRequested)
 
 
 class Nav(QObject):
@@ -117,20 +117,24 @@ class Nav(QObject):
         """
         return self.app.activeWindow() is not None or not self.busy()
 
-    def on_pad(self, action: str, pressed: bool) -> None:
+    def on_pad(self, action: str, pressed: bool, device: str = "") -> None:
+        # Each device is its own source: if the Deck reports both Steam's virtual pad and its built-in
+        # controller, one physical press arrives twice and the second copy is dropped.
+        source = f"pad:{device}"
         if not self._ours():
             return
         if action in gamepad.DIRECTIONS:
             if pressed:
-                self._held = action
-                if self._fresh(action, "pad"):
+                fresh = self._fresh(action, source)
+                if fresh:
+                    self._held = action
                     self.move(action)
-                self._repeat.start(self.REPEAT_DELAY)
+                    self._repeat.start(self.REPEAT_DELAY)
             elif self._held == action:
                 self._held = None
                 self._repeat.stop()
             return
-        if not pressed or not self._fresh(action, "pad"):
+        if not pressed or not self._fresh(action, source):
             return
         if action == "a":
             self.activate()
