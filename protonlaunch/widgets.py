@@ -243,8 +243,11 @@ class Sheet(QDialog):
             box.setReadOnly(True)
             box.setMinimumHeight(320)
             lay.addWidget(box, 1)
-        btns = QHBoxLayout()
-        btns.addStretch(1)
+        menu = len(buttons) > 3  # a list of choices: stack them, D-pad up/down
+        btns = QVBoxLayout() if menu else QHBoxLayout()
+        btns.setSpacing(10)
+        if not menu:
+            btns.addStretch(1)
         self.buttons: list[QPushButton] = []
         for i, text_ in enumerate(buttons):
             obj = "primary" if i == primary else ("danger" if i in danger else "")

@@ -33,6 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/main/get
 No pip, pacman, or developer mode needed. The script downloads the prebuilt binary and checks its checksum.
 
 - To use ProtonLaunch in Game Mode: **☰ Menu → Add ProtonLaunch to Steam**.
+- **Updates are built in:** when a new version is out, a banner on the home screen offers **Update now**; the download is checksum-verified and ProtonLaunch restarts into it. You can also use **☰ Menu → Check for updates**, or `protonlaunch --update` in Konsole.
 - In Desktop Mode you can also right-click any setup `.exe` → **Open With → ProtonLaunch**.
 - After installing something, restart Steam (STEAM button → Power → Restart Steam) to see it in your library.
 
@@ -52,6 +53,7 @@ To uninstall a program, remove its shortcut in Steam and delete its folder under
 ```bash
 protonlaunch                         # open the app
 protonlaunch ~/Downloads/setup.exe   # open and offer to install that file
+protonlaunch --update                # update ProtonLaunch itself
 ```
 
 ## Develop
@@ -67,4 +69,8 @@ The tests use a fake Proton and fake Steam install, so they run anywhere, includ
 `libegl1 libgl1 libglib2.0-0 libxkbcommon0 libdbus-1-3`. `PROTONLAUNCH_NO_GAMEPAD=1` turns off controller input;
 `PROTONLAUNCH_FULLSCREEN=1` forces full screen outside Game Mode.
 
-`get.sh` downloads the prebuilt binary in `bin/`. Rebuild it with `./protonlaunch/build_onefile.sh` and copy `dist/protonlaunch` to `bin/protonlaunch-linux-x86_64` (update the `.sha256`). Pushing a `v*` tag also publishes it to GitHub Releases.
+**Shipping a new version:** bump `__version__` in `protonlaunch/__init__.py`, then run
+`scripts/publish_bin.sh "one line of release notes"` and commit `bin/`. That rebuilds the binary and writes
+`bin/latest.json`, which `get.sh` and the in-app updater read (from `main`, then the development branch). Pushing a
+`v*` tag also publishes a GitHub release; the updater checks releases too and takes whichever version is newest.
+`PROTONLAUNCH_UPDATE_BASE=<url of a folder with latest.json>` points the updater elsewhere for testing.

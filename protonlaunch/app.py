@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, artwork, core, theme
+from . import __version__, artwork, core, theme, updater
 from .nav import Nav
 from .widgets import HintBar, Sheet, Steps, Tile, Toast, button, draw_glyph, label
 
@@ -90,6 +90,35 @@ class InstallThread(QThread):
             self.failed.emit(str(e))
 
 
+class UpdateCheckThread(QThread):
+    result = pyqtSignal(object, bool)  # updater.Update | None, reached any source
+
+    def run(self) -> None:
+        errors: list[Exception] = []
+        update = updater.check(__version__, errors=errors)
+        self.result.emit(update, len(errors) < len(updater.default_sources()))
+
+
+class UpdateDownloadThread(QThread):
+    progress = pyqtSignal(int, int)
+    done = pyqtSignal()
+    failed = pyqtSignal(str)
+
+    def __init__(self, update: updater.Update, target: Path):
+        super().__init__()
+        self.update_, self.target = update, target
+
+    def run(self) -> None:
+        try:
+            tmp = updater.download(self.update_, self.target.parent, self.progress.emit, self.isInterruptionRequested)
+            updater.install(tmp, self.target)
+            self.done.emit()
+        except updater.Cancelled:
+            self.failed.emit("")
+        except Exception as e:  # noqa: BLE001 — shown to the user
+            self.failed.emit(str(e) or type(e).__name__)
+
+
 # ── Pages ────────────────────────────────────────────────────────────────────
 
 
@@ -136,6 +165,20 @@ class HomePage(Page):
         lay.addWidget(label("Install a Windows program", "h1"))
         lay.addWidget(label("Pick a setup file. ProtonLaunch installs it and adds the program to your "
                             "Steam library.", "dim"))
+        self.banner = QFrame()
+        self.banner.setObjectName("banner")
+        self.banner.setStyleSheet(f"QFrame#banner {{ background: {theme.SURFACE}; border: 2px solid {theme.ACCENT};"
+                                  " border-radius: 12px; }")
+        b = QHBoxLayout(self.banner)
+        b.setContentsMargins(20, 10, 12, 10)
+        self.banner_text = label("", wrap=False)
+        b.addWidget(self.banner_text)
+        b.addStretch(1)
+        self.update_btn = button("Update now", "primary", lambda: self.win.start_update())
+        b.addWidget(self.update_btn)
+        b.addWidget(button("Later", slot=self.hide_banner))
+        self.banner.hide()
+        lay.addWidget(self.banner)
         lay.addSpacing(10)
         self.section = label("", "section")
         lay.addWidget(self.section)
@@ -186,6 +229,17 @@ class HomePage(Page):
     def enter(self) -> None:
         self.refresh()
         (self.tiles[1] if len(self.tiles) > 1 else self.tiles[0]).setFocus()
+
+    def show_banner(self, update: updater.Update) -> None:
+        self.banner_text.setText(f"ProtonLaunch {update.version} is available  ·  you have {__version__}")
+        self.banner.show()
+
+    def hide_banner(self) -> None:
+        focused = self.banner.isAncestorOf(QApplication.focusWidget())
+        self.banner.hide()
+        self.win.update_dismissed = True
+        if focused:
+            (self.tiles[1] if len(self.tiles) > 1 else self.tiles[0]).setFocus()
 
     def hints(self):
         return [("A", "Select", self.win.nav_activate), ("X", "Browse", self.x), ("☰", "Menu", self.win.open_menu)]
@@ -536,11 +590,85 @@ class DonePage(Page):
         return [("A", "Select", self.win.nav_activate), ("B", "Done", self.back)]
 
 
+class UpdatePage(Page):
+    title = "Update"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(48, 30, 48, 26)
+        lay.setSpacing(14)
+        self.heading = label("", "h1")
+        lay.addWidget(self.heading)
+        self.notes = label("", "dim")
+        lay.addWidget(self.notes)
+        lay.addStretch(1)
+        self.status = label("", "status")
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.status)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        lay.addWidget(self.bar)
+        lay.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        self.cancel_btn = button("Cancel", "danger", self.back)
+        row.addWidget(self.cancel_btn)
+        self.restart_btn = button("Restart ProtonLaunch", "primary", lambda: self.win.restart_after_update())
+        self.restart_btn.setMinimumWidth(260)
+        row.addWidget(self.restart_btn)
+        row.addStretch(1)
+        lay.addLayout(row)
+        self.finished = False
+
+    def reset(self, update: updater.Update) -> None:
+        self.finished = False
+        self.heading.setText(f"Updating to ProtonLaunch {update.version}")
+        self.notes.setText(update.notes)
+        self.notes.setVisible(bool(update.notes))
+        self.status.setText("Downloading…")
+        self.bar.setRange(0, 0)
+        self.cancel_btn.show()
+        self.cancel_btn.setEnabled(True)
+        self.restart_btn.hide()
+
+    def on_progress(self, done: int, total: int) -> None:
+        if total:
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(int(done * 1000 / total))
+            self.status.setText(f"Downloading…  {core.human_size(done)} of {core.human_size(total)}")
+        else:
+            self.status.setText(f"Downloading…  {core.human_size(done)}")
+
+    def on_done(self) -> None:
+        self.finished = True
+        self.heading.setText(self.heading.text().replace("Updating to", "Updated to"))
+        self.bar.setRange(0, 1)
+        self.bar.setValue(1)
+        self.status.setText("✓  Update installed. Restart to use the new version.")
+        self.cancel_btn.hide()
+        self.restart_btn.show()
+        self.restart_btn.setFocus()
+        self.win.update_hints()
+
+    def enter(self) -> None:
+        (self.restart_btn if self.finished else self.cancel_btn).setFocus()
+
+    def hints(self):
+        return [("A", "Select", self.win.nav_activate), ("B", "Later" if self.finished else "Cancel", self.back)]
+
+    def back(self) -> None:
+        if self.finished:
+            self.win.go_home()
+        else:
+            self.win.cancel_update()
+
+
 # ── Window ───────────────────────────────────────────────────────────────────
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, paths: core.Paths | None = None, use_nav: bool = True):
+    def __init__(self, paths: core.Paths | None = None, use_nav: bool = True, check_updates: bool | None = None):
         super().__init__()
         self.setObjectName("main")
         self.paths = paths or core.Paths.default()
@@ -550,6 +678,10 @@ class MainWindow(QMainWindow):
         self.job: core.Installer | None = None
         self.pending: core.PendingInstall | None = None
         self.current_installer: Path | None = None
+        self.update_info: updater.Update | None = None
+        self.update_dismissed = False
+        self.update_check: UpdateCheckThread | None = None
+        self.update_thread: UpdateDownloadThread | None = None
 
         self.setWindowTitle("ProtonLaunch")
         self.resize(1280, 800)
@@ -572,7 +704,8 @@ class MainWindow(QMainWindow):
         self.progress = InstallPage(self)
         self.pick = PickPage(self)
         self.done = DonePage(self)
-        for p in (self.home, self.browser, self.progress, self.pick, self.done):
+        self.updating = UpdatePage(self)
+        for p in (self.home, self.browser, self.progress, self.pick, self.done, self.updating):
             self.stack.addWidget(p)
 
         self.nav = Nav(QApplication.instance(), self.on_action, busy=lambda: self.thread is not None) \
@@ -580,6 +713,10 @@ class MainWindow(QMainWindow):
         QApplication.instance().focusChanged.connect(lambda *_: self.update_hints())
         self.refresh_launchers()
         self.go(self.home)
+        if check_updates is None:
+            check_updates = updater.self_path() is not None and not os.environ.get("PROTONLAUNCH_NO_UPDATE_CHECK")
+        if check_updates:
+            self.check_for_updates(manual=False)
 
     # chrome
     def _top_bar(self) -> QWidget:
@@ -803,19 +940,101 @@ class MainWindow(QMainWindow):
     def open_menu(self) -> None:
         if QApplication.activeModalWidget() is not None:
             return
-        options = ("Add ProtonLaunch to Steam", "Look for installers again", "About", "Quit ProtonLaunch", "Close")
+        options = ("Check for updates", "Add ProtonLaunch to Steam", "Look for installers again", "About",
+                   "Quit ProtonLaunch", "Close")
         choice = Sheet.ask(self, "Menu", "", options, primary=len(options) - 1)
         if choice == 0:
-            self.add_self_to_steam()
+            self.check_for_updates(manual=True)
         elif choice == 1:
+            self.add_self_to_steam()
+        elif choice == 2:
             self.go_home()
             self.flash("Checked Downloads, Desktop and SD cards")
-        elif choice == 2:
+        elif choice == 3:
             Sheet.ask(self, f"ProtonLaunch {__version__}",
                       "Installs Windows programs and games on Steam Deck and adds them to your Steam library.\n\n"
                       f"Installed programs: {self.paths.prefixes}\nInstall logs: {self.paths.logs}", ("Close",))
-        elif choice == 3:
+        elif choice == 4:
             self.close()
+
+    # ── updates ──────────────────────────────────────────────────────────
+
+    def check_for_updates(self, manual: bool) -> None:
+        if manual and updater.self_path() is None:
+            Sheet.ask(self, "Updates", "Updating from inside the app works for the downloaded ProtonLaunch. "
+                      "This copy runs from source — update it with git pull, or reinstall with get.sh.", ("Close",))
+            return
+        if self.update_check is not None:
+            return
+        if manual:
+            self.flash("Checking for updates…")
+        t = UpdateCheckThread()
+        t.result.connect(lambda u, online: self.on_update_checked(u, manual, online))
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda: setattr(self, "update_check", None))
+        self.update_check = t
+        t.start()
+
+    def on_update_checked(self, update: updater.Update | None, manual: bool, online: bool = True) -> None:
+        if update is not None:
+            self.update_info = update
+            if manual or not self.update_dismissed:
+                self.home.show_banner(update)
+            if manual and Sheet.ask(self, f"ProtonLaunch {update.version} is available",
+                                    (update.notes + "\n\n" if update.notes else "") + f"You have {__version__}.",
+                                    ("Update now", "Later")) == 0:
+                self.start_update()
+        elif manual and not online:
+            Sheet.ask(self, "Couldn't check for updates", "GitHub couldn't be reached. Check that the Deck is "
+                      "online and try again.", ("Close",))
+        elif manual:
+            Sheet.ask(self, "You're up to date", f"ProtonLaunch {__version__} is the latest version.", ("Close",))
+
+    def start_update(self) -> None:
+        target = updater.self_path()
+        if self.update_info is None or target is None or self.update_thread is not None:
+            return
+        if self.thread is not None:
+            Sheet.ask(self, "Finish the install first", "ProtonLaunch can update once the current install is "
+                      "done.", ("Close",))
+            return
+        self.updating.reset(self.update_info)
+        self.go(self.updating)
+        t = UpdateDownloadThread(self.update_info, target)
+        t.progress.connect(self.updating.on_progress)
+        t.done.connect(self.on_update_installed)
+        t.failed.connect(self.on_update_failed)
+        t.finished.connect(t.deleteLater)
+        t.finished.connect(lambda: setattr(self, "update_thread", None))
+        self.update_thread = t
+        t.start()
+
+    def cancel_update(self) -> None:
+        if self.update_thread is not None:
+            self.updating.cancel_btn.setEnabled(False)
+            self.updating.status.setText("Cancelling…")
+            self.update_thread.requestInterruption()
+        else:
+            self.go_home()
+
+    def on_update_installed(self) -> None:
+        self.home.banner.hide()
+        self.updating.on_done()
+
+    def on_update_failed(self, message: str) -> None:
+        self.go_home()
+        if message:
+            Sheet.ask(self, "Update failed", f"{message}\n\nProtonLaunch wasn't changed.", ("Close",))
+        else:
+            self.flash("Update cancelled")
+
+    def restart_after_update(self) -> None:
+        target = updater.self_path()
+        if target is None:
+            return
+        if self.nav:
+            self.nav.stop()
+        updater.restart(target)
 
     def add_self_to_steam(self) -> None:
         exe = Path(sys.executable if getattr(sys, "frozen", False) else Path.home() / ".local/bin/protonlaunch")
@@ -867,9 +1086,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ProtonLaunch {__version__}")
         return 0
     if "-h" in args or "--help" in args:
-        print("usage: protonlaunch [INSTALLER.exe|.msi]\n\n"
-              "Opens ProtonLaunch. Given an installer, asks to install it right away.")
+        print("usage: protonlaunch [INSTALLER.exe|.msi]\n"
+              "       protonlaunch --update\n\n"
+              "Opens ProtonLaunch. Given an installer, asks to install it right away.\n"
+              "--update downloads and installs the newest ProtonLaunch.")
         return 0
+    if "--update" in args:
+        return updater.cli_update(__version__)
     app = QApplication(argv[:1])
     app.setApplicationName("ProtonLaunch")
     app.setStyle("Fusion")

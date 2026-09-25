@@ -220,6 +220,47 @@ class TestWindow(Env):
         self.wait_for(lambda: "Install failed" in self.asked)
         self.assertIs(self.win.stack.currentWidget(), self.win.home)
 
+    def test_update_banner_download_and_restart(self):
+        import hashlib
+        import json
+        from protonlaunch import app as app_mod
+        from protonlaunch import updater
+        from tests.test_update import NEW_APP, Server
+        web = self.tmp / "web" / "bin"
+        web.mkdir(parents=True)
+        (web / updater.ASSET).write_bytes(NEW_APP)
+        (web / "latest.json").write_text(json.dumps(
+            {"version": "9.0.0", "sha256": hashlib.sha256(NEW_APP).hexdigest(), "notes": "Shiny new things."}))
+        server = Server(self.tmp / "web")
+        target = self.tmp / "installed" / "protonlaunch"
+        target.parent.mkdir()
+        target.write_bytes(b"old app")
+        restarted = []
+        orig = (updater.self_path, updater.restart)
+        updater.self_path = lambda: target
+        updater.restart = lambda t, args=None: restarted.append(t)
+        os.environ["PROTONLAUNCH_UPDATE_BASE"] = f"{server.url}/bin"
+        try:
+            win = app_mod.MainWindow(self.paths, check_updates=True)  # checks in the background at start
+            win.installer_dirs = [self.downloads]
+            win.show()
+            self.wait_for(lambda: win.home.banner.isVisible())
+            self.assertIn("9.0.0 is available", win.home.banner_text.text())
+            self.shot("8-update-banner", win)
+            win.home.update_btn.click()
+            self.assertIs(win.stack.currentWidget(), win.updating)
+            self.wait_for(lambda: win.updating.restart_btn.isVisible())
+            self.shot("9-update-done", win)
+            self.assertEqual(target.read_bytes(), NEW_APP)
+            self.assertFalse(win.home.banner.isVisible())
+            win.updating.restart_btn.click()
+            self.assertEqual(restarted, [target])
+            win.close()
+        finally:
+            updater.self_path, updater.restart = orig
+            del os.environ["PROTONLAUNCH_UPDATE_BASE"]
+            server.close()
+
     def test_sheet_screenshot(self):
         if not self.shots:
             self.skipTest("screenshots only")
