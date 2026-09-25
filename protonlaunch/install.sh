@@ -1,62 +1,33 @@
 #!/bin/bash
-# ProtonLaunch installer for Steam Deck
-set -e
+# Install ProtonLaunch from a source checkout (most people should use get.sh instead).
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_DIR="$HOME/.local/share/protonlaunch"
-DESKTOP_DIR="$HOME/.local/share/applications"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BIN_DIR="$HOME/.local/bin"
-BINARY_SOURCE="$SCRIPT_DIR/dist/protonlaunch"
+DESKTOP_DIR="$HOME/.local/share/applications"
+INSTALL_DIR="$HOME/.local/share/protonlaunch/app"
 
-echo "=== ProtonLaunch Installer ==="
-echo ""
+mkdir -p "$BIN_DIR" "$DESKTOP_DIR"
 
-# Install app
-echo "Installing ProtonLaunch..."
-mkdir -p "$INSTALL_DIR"
-mkdir -p "$BIN_DIR"
-
-if [ -x "$BINARY_SOURCE" ]; then
-    echo "Using self-contained onefile build."
-    cp "$BINARY_SOURCE" "$BIN_DIR/protonlaunch"
-    chmod +x "$BIN_DIR/protonlaunch"
+if [ -x "$ROOT_DIR/dist/protonlaunch" ]; then
+    echo "Installing onefile build…"
+    install -m 755 "$ROOT_DIR/dist/protonlaunch" "$BIN_DIR/protonlaunch"
 else
-    echo "No onefile binary found; installing Python source mode."
-    echo "Checking Python dependencies..."
-    ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-    REQ="$ROOT_DIR/requirements.txt"
-    if [ -f "$REQ" ]; then
-        echo "Installing from requirements.txt…"
-        /usr/bin/python3 -m pip install --user -r "$REQ"
-    elif ! /usr/bin/python3 -c "import PyQt6, requests, vdf" 2>/dev/null; then
-        echo "Installing user Python dependencies (PyQt6 + requests + vdf)…"
-        /usr/bin/python3 -m pip install --user PyQt6 requests vdf
-    fi
-
-    rm -rf "$INSTALL_DIR/protonlaunch"
+    echo "No onefile build found (run build_onefile.sh); installing from source."
+    python3 -c "import PyQt6" 2>/dev/null || python3 -m pip install --user -r "$ROOT_DIR/requirements.txt"
+    rm -rf "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR"
     cp -a "$SCRIPT_DIR" "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/protonlaunch/protonlaunch.py"
-
-    # Create launcher script
-    cat > "$BIN_DIR/protonlaunch" << 'EOF'
+    cat > "$BIN_DIR/protonlaunch" << LAUNCH
 #!/bin/bash
-PYTHONPATH="$HOME/.local/share/protonlaunch" /usr/bin/python3 -m protonlaunch.protonlaunch "$@"
-EOF
+PYTHONPATH="$INSTALL_DIR" exec python3 -m protonlaunch "\$@"
+LAUNCH
     chmod +x "$BIN_DIR/protonlaunch"
 fi
 
-# Desktop entry
-mkdir -p "$DESKTOP_DIR"
 sed "s|/home/deck|$HOME|g" "$SCRIPT_DIR/protonlaunch.desktop" > "$DESKTOP_DIR/protonlaunch.desktop"
 chmod +x "$DESKTOP_DIR/protonlaunch.desktop"
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 
-echo ""
-echo "✓ ProtonLaunch installed!"
-echo ""
-echo "Run with:  protonlaunch"
-echo "Or find it in your application menu under Games."
-echo ""
-echo "To add to Steam Game Mode:"
-echo "  1. Open Steam → Add a Game → Add a Non-Steam Game"
-echo "  2. Browse to: $BIN_DIR/protonlaunch"
+echo "✓ Installed. Run 'protonlaunch' or find it in the app menu."

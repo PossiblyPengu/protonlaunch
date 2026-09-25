@@ -1,9 +1,10 @@
 [Desktop Entry]
 Name=ProtonLaunch
-Comment=Install and launch Windows games on Steam Deck
-Exec=/home/deck/.local/bin/protonlaunch
+Comment=Install Windows programs and games on Steam Deck
+Exec=/home/deck/.local/bin/protonlaunch %f
 Icon=applications-games
 Terminal=false
 Type=Application
-Categories=Game;
+Categories=Game;Utility;
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/vnd.microsoft.portable-executable;application/x-msi;application/x-ms-installer;
 StartupNotify=true

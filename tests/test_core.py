@@ -1,0 +1,608 @@
+"""Headless tests for the install engine. A fake Proton stands in for the real one."""
+import os
+import struct
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import zlib
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from protonlaunch import core  # noqa: E402
+
+
+def make_lnk(target: str) -> bytes:
+    """Minimal Shell Link with only a LinkInfo local base path (what Wine writes)."""
+    header = bytearray(0x4C)
+    header[0:4] = b"L\x00\x00\x00"
+    struct.pack_into("<I", header, 0x14, 0x02)  # HasLinkInfo
+    volume = struct.pack("<IIII", 0x11, 3, 0, 0x10) + b"\x00"
+    base = target.encode("cp1252") + b"\x00"
+    hdr = 0x1C
+    size = hdr + len(volume) + len(base) + 1
+    info = struct.pack("<7I", size, hdr, 1, hdr, hdr + len(volume), 0, size - 1) + volume + base + b"\x00"
+    return bytes(header) + info
+
+
+def make_pe(icon: bytes, width: int = 48, bits: int = 32) -> bytes:
+    """A minimal PE32+ .exe whose only content is a resource section holding one icon."""
+    def rdir(entries):  # IMAGE_RESOURCE_DIRECTORY + entries
+        return struct.pack("<IIHHHH", 0, 0, 0, 0, 0, len(entries)) + b"".join(
+            struct.pack("<II", i, t) for i, t in entries)
+
+    group = struct.pack("<HHH", 0, 1, 1) + struct.pack("<BBBBHHIH", width, width, 0, 0, 1, bits, len(icon), 1)
+    # layout (offsets inside .rsrc): root | icon type dir | icon lang dir | group type dir | group lang dir
+    #                                  | 2 data entries | icon data | group data
+    ityp_o, ilang_o, gtyp_o, glang_o = 32, 56, 80, 104  # root directory is at 0
+    ide_o, gde_o = 128, 144
+    icon_o = 160
+    group_o = icon_o + len(icon) + (-len(icon)) % 4
+    rva = 0x1000
+    rsrc = bytearray()
+    rsrc += rdir([(3, 0x80000000 | ityp_o), (14, 0x80000000 | gtyp_o)])
+    rsrc += rdir([(1, 0x80000000 | ilang_o)])
+    rsrc += rdir([(0x409, ide_o)])
+    rsrc += rdir([(1, 0x80000000 | glang_o)])
+    rsrc += rdir([(0x409, gde_o)])
+    rsrc += struct.pack("<IIII", rva + icon_o, len(icon), 0, 0)
+    rsrc += struct.pack("<IIII", rva + group_o, len(group), 0, 0)
+    assert len(rsrc) == icon_o
+    rsrc += icon + b"\0" * ((-len(icon)) % 4) + group
+    dos = bytearray(64)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 64)
+    coff = struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, 240, 0x22)
+    opt = bytearray(240)
+    struct.pack_into("<H", opt, 0, 0x20B)
+    struct.pack_into("<II", opt, 112 + 16, rva, len(rsrc))
+    sec = struct.pack("<8sIIIIIIHHI", b".rsrc", len(rsrc), rva, len(rsrc), 0x400, 0, 0, 0, 0, 0x40000040)
+    head = bytes(dos) + b"PE\0\0" + coff + bytes(opt) + sec
+    return head + b"\0" * (0x400 - len(head)) + bytes(rsrc)
+
+
+def bmp_icon(size: int = 16) -> bytes:
+    """An icon image the way most .exe files store it: a 32-bit DIB (height doubled for the mask)."""
+    header = struct.pack("<IiiHHIIiiII", 40, size, size * 2, 1, 32, 0, 0, 0, 0, 0, 0)
+    pixels = bytes([40, 80, 220, 255]) * (size * size)  # BGRA: orange-ish blue
+    mask = b"\0" * (((size + 31) // 32) * 4 * size)
+    return header + pixels + mask
+
+
+def png_icon() -> bytes:
+    """A real 2x2 PNG, built by hand so no image library is needed."""
+    def chunk(t, data):
+        return struct.pack(">I", len(data)) + t + data + struct.pack(">I", zlib.crc32(t + data))
+    raw = b"".join(b"\0" + bytes([255, 0, 0, 255]) * 2 for _ in range(2))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+FAKE_PROTON = """#!/bin/bash
+[ "$1" = run ] || [ "$1" = waitforexitandrun ] || exit 2
+[ -n "$FAKE_BROKEN" ] && { echo "Traceback: proton exploded"; exit 1; }
+# Like GE-Proton's protonfixes: without an app id, it needs a number in the compat path.
+# (Checks only the folder name: temp dirs have random digits, /home/deck/... paths don't.)
+if [ -z "$SteamAppId$SteamGameId$UMU_ID" ] && ! [[ "$(basename "$STEAM_COMPAT_DATA_PATH")" =~ [0-9] ]]; then
+  echo "IndexError: list index out of range"; exit 1
+fi
+pfx="$STEAM_COMPAT_DATA_PATH/pfx"
+c="$pfx/drive_c"
+if [ "$2" = cmd.exe ]; then  # prefix setup, like real Proton: C: and Z: only
+  mkdir -p "$c/windows/system32" "$pfx/dosdevices"
+  ln -sfn ../drive_c "$pfx/dosdevices/c:"
+  ln -sfn / "$pfx/dosdevices/z:"
+  touch "$pfx/system.reg"
+  exit 0
+fi
+ls "$pfx/dosdevices" > "$STEAM_COMPAT_DATA_PATH/drives-during-install.txt"
+echo "$2" > "$STEAM_COMPAT_DATA_PATH/installer-arg.txt"
+[ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"
+mkdir -p "$c/Program Files/Cool Game/bin" "$c/users/steamuser/Desktop" \\
+         "$c/users/steamuser/AppData/Local/Temp"
+touch "$c/windows/system32/notepad.exe" "$c/users/steamuser/AppData/Local/Temp/setup-helper.exe"
+[ -n "$FAKE_NOTHING" ] && exit 0
+if [ -n "$FAKE_TO_D" ]; then  # user picked D:\\Games\\Cool Game in the installer
+  mkdir -p "$pfx/dosdevices/d:/Games/Cool Game"
+  head -c 3000000 /dev/zero > "$pfx/dosdevices/d:/Games/Cool Game/CoolGame.exe"
+  touch "$pfx/dosdevices/d:/Games/Cool Game/unins000.exe"
+  exit 0
+fi
+if [ -n "$FAKE_EXE_SRC" ]; then cp "$FAKE_EXE_SRC" "$c/Program Files/Cool Game/bin/CoolGame.exe"
+else head -c 3000000 /dev/zero > "$c/Program Files/Cool Game/bin/CoolGame.exe"; fi
+touch "$c/Program Files/Cool Game/unins000.exe" "$c/Program Files/Cool Game/bin/CrashReporter.exe"
+[ -n "$FAKE_LNK" ] && cp "$FAKE_LNK" "$c/users/steamuser/Desktop/Cool Game Deluxe.lnk"
+echo "installed $2"
+"""
+
+
+class Env(unittest.TestCase):
+    def setUp(self):
+        self.env_backup = dict(os.environ)
+        self.tmp = Path(tempfile.mkdtemp())
+        self.paths = core.Paths(self.tmp / "data")
+        # Fake Steam with one user and one Proton
+        self.steam = self.tmp / "Steam"
+        (self.steam / "steamapps/common").mkdir(parents=True)
+        (self.steam / "userdata/12345/config").mkdir(parents=True)
+        proton_dir = self.steam / "compatibilitytools.d/GE-Proton9-20"
+        (proton_dir / "files/bin").mkdir(parents=True)
+        self.proton = proton_dir / "proton"
+        self.proton.write_text(FAKE_PROTON)
+        self.proton.chmod(0o755)
+        # Steam Linux Runtime (sniper) that this Proton requires, like the real ones
+        (proton_dir / "toolmanifest.vdf").write_text(
+            '"manifest"\n{\n  "commandline" "/proton %verb%"\n  "require_tool_appid" "1628350"\n}\n')
+        sniper = self.steam / "steamapps/common/SteamLinuxRuntime_sniper"
+        sniper.mkdir(parents=True)
+        (self.steam / "steamapps/appmanifest_1628350.acf").write_text(
+            '"AppState"\n{\n  "appid" "1628350"\n  "installdir" "SteamLinuxRuntime_sniper"\n}\n')
+        self.entry_log = self.tmp / "entry.log"
+        self.entry = sniper / "_v2-entry-point"
+        self.entry.write_text('#!/bin/bash\necho "$@" >> "$FAKE_ENTRY_LOG"\n'
+                              '[ "$1" = --verb=waitforexitandrun ] && [ "$2" = -- ] || exit 3\n'
+                              'shift 2\nexec "$@"\n')
+        self.entry.chmod(0o755)
+        os.environ["FAKE_ENTRY_LOG"] = str(self.entry_log)
+        ws = proton_dir / "files/bin/wineserver"
+        ws.write_text("#!/bin/bash\nexit 0\n")
+        ws.chmod(0o755)
+        self.installer = self.tmp / "setup_cool_game_v1.2.3_(12345).exe"
+        self.installer.write_bytes(b"MZ")
+        self.home = self.tmp / "home"
+        os.environ.pop("PROTONLAUNCH_NO_CONTAINER", None)
+        (self.home / "Downloads").mkdir(parents=True)
+        os.environ["HOME"] = str(self.home)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def job(self, **kw):
+        return core.Installer(self.installer, self.paths, steam_roots_override=[self.steam], **kw)
+
+
+class TestNaming(unittest.TestCase):
+    def test_guess_name(self):
+        cases = {
+            "setup_the_witcher_3_wild_hunt_goty_1.32_(a)_(10709).exe": "The Witcher 3 Wild Hunt Goty",
+            "ChromeSetup.exe": "Chrome",
+            "npp.8.6.Installer.x64.exe": "Npp",
+            "Firefox Setup 120.0.exe": "Firefox",
+            "7z2301-x64.exe": "7z2301",
+            "setup.exe": "setup",
+            "Battle.net-Setup.exe": "Battle Net",
+        }
+        for f, want in cases.items():
+            self.assertEqual(core.guess_name(f), want, f)
+
+    def test_plain_setup_named_after_folder(self):
+        self.assertEqual(core.guess_name("/x/Some Game [GOG]/setup.exe"), "Some Game")
+        self.assertEqual(core.guess_name("/x/Cool_Tool_v2.1/install.exe"), "Cool Tool")
+        self.assertEqual(core.guess_name("/home/deck/Downloads/setup.exe"), "setup")
+
+    def test_slugify(self):
+        self.assertEqual(core.slugify("The Witcher 3: GOTY"), "the-witcher-3-goty")
+        self.assertEqual(core.slugify("!!!"), "app")
+
+
+class TestLnk(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(core.lnk_target(make_lnk(r"C:\Program Files\X\x.exe")), r"C:\Program Files\X\x.exe")
+        self.assertIsNone(core.lnk_target(b"garbage"))
+
+    def test_windows_to_unix_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as d:
+            pfx = Path(d)
+            exe = pfx / "drive_c/Program Files/Game/Game.exe"
+            exe.parent.mkdir(parents=True)
+            exe.touch()
+            self.assertEqual(core.windows_to_unix(pfx, r"c:\PROGRAM FILES\game\game.EXE"), exe)
+            self.assertIsNone(core.windows_to_unix(pfx, r"C:\nope.exe"))
+
+
+class TestIcons(unittest.TestCase):
+    def test_png_icon_returned_as_is(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "a.exe"
+            exe.write_bytes(make_pe(png_icon(), width=0))
+            self.assertEqual(core.exe_icon_data(exe), png_icon())
+
+    def test_bmp_icon_wrapped_as_ico(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "a.exe"
+            icon = bmp_icon()
+            exe.write_bytes(make_pe(icon, width=16))
+            data = core.exe_icon_data(exe)
+            self.assertEqual(data[:6], struct.pack("<HHH", 0, 1, 1))
+            self.assertEqual(struct.unpack_from("<I", data, 6 + 12)[0], 22)  # image offset
+            self.assertEqual(data[22:], icon)
+
+    def test_not_an_exe(self):
+        with tempfile.TemporaryDirectory() as d:
+            for content in (b"", b"MZ" + b"\0" * 100, b"hello"):
+                f = Path(d) / "x.exe"
+                f.write_bytes(content)
+                self.assertIsNone(core.exe_icon_data(f))
+        self.assertIsNone(core.exe_icon_data(Path("/nonexistent.exe")))
+
+
+class TestFindingInstallers(unittest.TestCase):
+    def test_find_sort_and_parts(self):
+        with tempfile.TemporaryDirectory() as d:
+            dl = Path(d)
+            (dl / "Game [GOG]").mkdir()
+            gog = dl / "Game [GOG]" / "setup_game_1.0.exe"
+            gog.write_bytes(b"x" * 100)
+            (dl / "Game [GOG]" / "setup_game_1.0-1.bin").write_bytes(b"x" * 1000)
+            (dl / "Game [GOG]" / "unins000.exe").write_bytes(b"x")
+            old = dl / "tool.msi"
+            old.write_bytes(b"x" * 10)
+            os.utime(old, (1, 1))
+            (dl / "readme.txt").write_text("x")
+            (dl / ".hidden").mkdir()
+            (dl / ".hidden" / "secret.exe").write_bytes(b"x")
+            deep = dl / "a" / "b" / "c"
+            deep.mkdir(parents=True)
+            (deep / "too-deep.exe").write_bytes(b"x")
+            found = core.find_installers([dl])
+            self.assertEqual([f.path.name for f in found], ["setup_game_1.0.exe", "tool.msi"])
+            self.assertEqual(found[0].size, 1100)  # exe + its .bin part
+
+    def test_installer_files_and_delete(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "setup_x.exe"
+            exe.write_bytes(b"x" * 5)
+            for n in ("setup_x-1.bin", "setup_x-2.bin", "SETUP_X.BIN", "other-1.bin"):
+                (Path(d) / n).write_bytes(b"y" * 10)
+            files = core.installer_files(exe)
+            self.assertEqual(sorted(f.name for f in files),
+                             ["SETUP_X.BIN", "setup_x-1.bin", "setup_x-2.bin", "setup_x.exe"])
+            self.assertEqual(core.delete_files(files), 35)
+            self.assertEqual([p.name for p in Path(d).iterdir()], ["other-1.bin"])
+
+    def test_removable_media(self):
+        mounts = ("/dev/mmcblk0p1 /run/media/deck/SD\\040Card ext4 rw 0 0\n"
+                  "/dev/nvme0n1p8 /home ext4 rw 0 0\n"
+                  "/dev/sda1 /run/media/deck/USB vfat rw 0 0\n")
+        self.assertEqual(core.removable_media(mounts),
+                         [Path("/run/media/deck/SD Card"), Path("/run/media/deck/USB")])
+
+
+class TestGamepad(unittest.TestCase):
+    def test_nodes(self):
+        from protonlaunch import gamepad
+        text = ("I: Bus=0003\nN: Name=\"Microsoft X-Box 360 pad 0\"\nH: Handlers=event12 js0 \n\n"
+                "I: Bus=0011\nN: Name=\"AT keyboard\"\nH: Handlers=sysrq kbd event3\n")
+        self.assertEqual(gamepad.joystick_event_nodes(text), ["/dev/input/event12"])
+
+    def test_buttons_hat_and_stick(self):
+        from protonlaunch import gamepad as g
+        st = g.PadState()
+        self.assertEqual(st.feed(g.EV_KEY, 0x130, 1), [("a", True)])
+        self.assertEqual(st.feed(g.EV_KEY, 0x130, 2), [])  # autorepeat ignored
+        self.assertEqual(st.feed(g.EV_KEY, 0x130, 0), [("a", False)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_HAT0Y, -1), [("up", True)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_HAT0Y, 0), [("up", False)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 20000), [("right", True)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 12000), [])  # hysteresis keeps it held
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, 2000), [("right", False)])
+        self.assertEqual(st.feed(g.EV_ABS, g.ABS_X, -30000), [("left", True)])
+
+
+class TestVdf(unittest.TestCase):
+    def test_roundtrip(self):
+        data = {"shortcuts": {"0": {"appid": -5, "AppName": "Ä", "LastPlayTime": 7,
+                                    "big": core.U64(2**40), "tags": {"0": "x"}}}}
+        raw = core.vdf_dumps(data)
+        self.assertEqual(core.vdf_loads(raw), data)
+        self.assertEqual(core.vdf_dumps(core.vdf_loads(raw)), raw)
+
+    def test_rejects_unknown_type(self):
+        with self.assertRaises(ValueError):
+            core.vdf_loads(b"\x00shortcuts\x00\x09x\x00\x08\x08")
+
+
+class TestSteamShortcuts(Env):
+    def test_add_replace_remove(self):
+        cfg = self.steam / "userdata/12345/config"
+        existing = {"shortcuts": {"0": {"appid": 1, "AppName": "Other", "Exe": '"/x"'}}}
+        (cfg / "shortcuts.vdf").write_bytes(core.vdf_dumps(existing))
+        appid, n = core.add_steam_shortcut("Cool", "/l/cool.sh", "/g", roots=[self.steam])
+        self.assertEqual(n, 1)
+        core.add_steam_shortcut("Cool", "/l/cool.sh", "/g", roots=[self.steam])  # no duplicate
+        sc = core.vdf_loads((cfg / "shortcuts.vdf").read_bytes())["shortcuts"]
+        self.assertEqual([e["AppName"] for e in sc.values()], ["Other", "Cool"])
+        self.assertEqual(sc["1"]["appid"] & 0xFFFFFFFF, appid)
+        self.assertTrue(appid & 0x80000000)
+        self.assertTrue((cfg / "shortcuts.vdf.protonlaunch-bak").exists())
+        core.remove_steam_shortcut(appid, roots=[self.steam])
+        sc = core.vdf_loads((cfg / "shortcuts.vdf").read_bytes())["shortcuts"]
+        self.assertEqual([e["AppName"] for e in sc.values()], ["Other"])
+
+
+class TestRuntimes(Env):
+    def test_prefers_ge(self):
+        stock = self.steam / "steamapps/common/Proton 9.0"
+        stock.mkdir(parents=True)
+        (stock / "proton").write_text("")
+        exp = self.steam / "steamapps/common/Proton - Experimental"
+        exp.mkdir(parents=True)
+        (exp / "proton").write_text("")
+        old_ge = self.steam / "compatibilitytools.d/GE-Proton8-1"
+        old_ge.mkdir(parents=True)
+        (old_ge / "proton").write_text("")
+        rts = core.find_runtimes([self.steam], extra_tool_dirs=[], include_system_wine=False)
+        self.assertEqual([r.name for r in rts],
+                         ["GE-Proton9-20", "GE-Proton8-1", "Proton - Experimental", "Proton 9.0"])
+        self.assertTrue(rts[0].wineserver().endswith("files/bin/wineserver"))
+
+    def test_none(self):
+        empty = self.tmp / "empty"
+        (empty / "steamapps").mkdir(parents=True)
+        self.assertEqual(core.find_runtimes([empty], extra_tool_dirs=[], include_system_wine=False), [])
+
+
+class TestInstallFlow(Env):
+    def test_end_to_end_with_shortcut(self):
+        lnk = self.tmp / "x.lnk"
+        lnk.write_bytes(make_lnk(r"C:\Program Files\Cool Game\bin\CoolGame.exe"))
+        os.environ["FAKE_LNK"] = str(lnk)
+        statuses = []
+        job = self.job(status=statuses.append)
+        pending = job.run()
+        self.assertEqual(pending.name, "Cool Game")
+        self.assertTrue(core.is_confident(pending.candidates))
+        top = pending.candidates[0]
+        self.assertEqual(top.exe.name, "CoolGame.exe")
+        names = [c.exe.name for c in pending.candidates]
+        self.assertNotIn("notepad.exe", names)
+        self.assertNotIn("setup-helper.exe", names)
+        self.assertLess(names.index("CoolGame.exe"), names.index("unins000.exe"))
+
+        app = job.finish(pending, top.exe, core.best_name(pending, top))
+        self.assertEqual(app.name, "Cool Game Deluxe")
+        self.assertTrue(any("installer" in s for s in statuses))
+        script = Path(app.launcher).read_text()
+        self.assertIn("STEAM_COMPAT_DATA_PATH=", script)
+        self.assertIn("CoolGame.exe", script)
+        self.assertTrue(os.access(app.launcher, os.X_OK))
+        self.assertEqual([a.id for a in core.Library(self.paths).load()], ["cool-game"])
+        sc = core.vdf_loads((self.steam / "userdata/12345/config/shortcuts.vdf").read_bytes())
+        self.assertEqual(sc["shortcuts"]["0"]["AppName"], "Cool Game Deluxe")
+
+        # Same installer again gets its own prefix
+        self.assertEqual(core.Library(self.paths).unique_id("Cool Game"), "cool-game-2")
+
+        core.uninstall(app, self.paths, roots=[self.steam])
+        self.assertFalse(Path(app.prefix).exists())
+        self.assertEqual(core.Library(self.paths).load(), [])
+        sc = core.vdf_loads((self.steam / "userdata/12345/config/shortcuts.vdf").read_bytes())
+        self.assertEqual(sc["shortcuts"], {})
+
+    def test_without_shortcut_still_picks_program(self):
+        job = self.job()
+        pending = job.run()
+        job.close()
+        self.assertEqual(pending.candidates[0].exe.name, "CoolGame.exe")
+        self.assertTrue(core.is_confident(pending.candidates))
+
+    def test_installer_copy_is_never_the_program(self):
+        # Installer drops a byte-identical copy of itself plus a setup tool, and nothing else.
+        self.installer.write_bytes(b"MZ" + b"\x01" * 5_000_000)
+        os.environ["FAKE_NOTHING"] = "1"
+        job = self.job()
+        pending = job.run()
+        job.close()
+        c = pending.pfx / "drive_c/Program Files/Cool Game"
+        c.mkdir(parents=True, exist_ok=True)
+        (c / "cache.exe").write_bytes(self.installer.read_bytes())  # renamed copy
+        (c / "GameSetup.exe").write_bytes(b"MZ" + b"\x02" * 5_000_000)
+        cands = core.find_program(pending.pfx, pending.name, pending.installer)
+        self.assertNotIn("cache.exe", [x.exe.name for x in cands])
+        self.assertFalse(core.is_confident(cands, pending.installer))
+
+    def test_program_wins_over_installer_named_shortcut(self):
+        lnk = self.tmp / "x.lnk"
+        lnk.write_bytes(make_lnk(r"C:\Program Files\Cool Game\bin\CoolGame.exe"))
+        os.environ["FAKE_LNK"] = str(lnk)
+        job = self.job()
+        pending = job.run()
+        job.close()
+        self.assertTrue(core.is_confident(pending.candidates, pending.installer))
+        self.assertEqual(pending.candidates[0].exe.name, "CoolGame.exe")
+        self.assertNotEqual(pending.candidates[0].exe.name, self.installer.name)
+
+    def test_portable_program(self):
+        os.environ["FAKE_NOTHING"] = "1"
+        job = self.job()
+        pending = job.run()
+        self.assertFalse(core.is_confident(pending.candidates))
+        exe = core.adopt_portable(pending)
+        self.assertTrue(exe.is_file())
+        app = job.finish(pending, exe, "Evil\nrm -rf ~")
+        self.assertTrue(app.exe.endswith(self.installer.name))
+        self.assertEqual(app.name, "Evil rm -rf ~")
+        self.assertNotIn("\nrm", Path(app.launcher).read_text())
+
+    def test_cancel_removes_prefix(self):
+        os.environ["FAKE_SLEEP"] = "30"
+        job = self.job()
+        threading.Timer(0.5, job.cancel).start()
+        t0 = time.time()
+        with self.assertRaises(core.Cancelled):
+            job.run()
+        self.assertLess(time.time() - t0, 10)
+        self.assertFalse((self.paths.prefixes / "cool-game").exists())
+
+    def test_no_runtime(self):
+        empty = self.tmp / "empty"
+        (empty / "steamapps").mkdir(parents=True)
+        os.environ["PATH"] = str(self.tmp)  # hide any system wine
+        job = core.Installer(self.installer, self.paths, steam_roots_override=[empty])
+        with self.assertRaises(core.InstallError) as ctx:
+            job.run()
+        self.assertEqual(str(ctx.exception), "NO_RUNTIME")
+
+    def test_rejects_non_installer(self):
+        bad = self.tmp / "notes.txt"
+        bad.write_text("x")
+        with self.assertRaises(core.InstallError):
+            core.Installer(bad, self.paths, steam_roots_override=[self.steam]).run()
+
+    def test_runs_inside_steam_linux_runtime_like_steam(self):
+        job = self.job()
+        pending = job.run()
+        job.close()
+        self.assertEqual(job.entry, self.entry)
+        calls = self.entry_log.read_text().splitlines()
+        self.assertEqual(len(calls), 2)  # Windows setup, then the installer
+        for c in calls:
+            self.assertTrue(c.startswith(f"--verb=waitforexitandrun -- {self.proton} waitforexitandrun "))
+        self.assertIn("cmd.exe /c exit", calls[0])
+        self.assertTrue(calls[1].endswith(self.installer.name))
+        app = job.finish(pending, pending.candidates[0].exe)
+        script = Path(app.launcher).read_text()
+        self.assertIn(f"ENTRY={self.entry}", script)
+        self.assertIn('"$ENTRY" --verb=waitforexitandrun -- "$PROTON" waitforexitandrun', script)
+
+    def test_asks_when_container_missing(self):
+        self.entry.unlink()
+        with self.assertRaises(core.InstallError) as ctx:
+            self.job().run()
+        self.assertEqual(str(ctx.exception), "NO_CONTAINER:1628350")
+        self.assertFalse(self.paths.prefixes.exists() and any(self.paths.prefixes.iterdir()))
+
+    def test_falls_back_to_plain_proton_without_container(self):
+        self.entry.unlink()
+        job = self.job(allow_no_container=True)
+        job.run()
+        job.close()
+        self.assertIsNone(job.entry)
+        self.assertFalse(self.entry_log.exists())
+        self.assertIn("Warning: the Steam Linux Runtime", (self.paths.logs / "cool-game.log").read_text())
+
+    def test_proton_gets_an_app_id(self):
+        # 'setup' has no digits: GE-Proton's protonfixes would crash without SteamAppId.
+        inst = self.home / "Downloads" / "setup.exe"
+        inst.write_bytes(b"MZ")
+        for k in ("SteamAppId", "SteamGameId", "UMU_ID"):
+            os.environ.pop(k, None)
+        job = core.Installer(inst, self.paths, steam_roots_override=[self.steam])
+        pending = job.run()
+        self.assertEqual(pending.id, "setup")
+        app = job.finish(pending, pending.candidates[0].exe)
+        self.assertIn('SteamAppId="${SteamAppId:-0}"', Path(app.launcher).read_text())
+
+    def test_broken_proton_is_reported_not_nothing_installed(self):
+        os.environ["FAKE_BROKEN"] = "1"
+        with self.assertRaises(core.InstallError) as ctx:
+            self.job().run()
+        msg = str(ctx.exception)
+        self.assertIn("GE-Proton9-20 failed to start", msg)
+        self.assertIn("proton exploded", msg)
+        self.assertEqual(list(self.paths.prefixes.iterdir()), [])
+        self.assertTrue((self.paths.logs / "cool-game.log").exists())
+
+    def test_msi_command(self):
+        rt = core.Runtime("P", "proton", "/p/proton")
+        self.assertEqual(core.run_command(rt, "D:\\a.msi"), ["/p/proton", "run", "msiexec", "/i", "D:\\a.msi"])
+        self.assertEqual(core.run_command(rt, "x.exe", entry=Path("/e/_v2-entry-point")),
+                         ["/e/_v2-entry-point", "--verb=waitforexitandrun", "--", "/p/proton",
+                          "waitforexitandrun", "x.exe"])
+
+    def test_installer_sees_home_as_d_and_no_rootfs(self):
+        inst = self.home / "Downloads" / self.installer.name
+        inst.write_bytes(b"MZ")
+        job = core.Installer(inst, self.paths, steam_roots_override=[self.steam])
+        pending = job.run()
+        job.close()
+        drives = (pending.compat_dir / "drives-during-install.txt").read_text().split()
+        self.assertIn("c:", drives)
+        self.assertIn("d:", drives)
+        self.assertNotIn("z:", drives)  # the full "rootfs" system drive is hidden while installing
+        arg = (pending.compat_dir / "installer-arg.txt").read_text().strip()
+        self.assertEqual(arg, "D:\\Downloads\\" + inst.name)
+        dd = pending.pfx / "dosdevices"
+        self.assertEqual(os.readlink(dd / "d:"), str(self.home.resolve()))
+        self.assertEqual(os.readlink(dd / "z:"), "/")  # restored for running the program
+
+    def test_installer_outside_home_gets_its_own_drive(self):
+        job = self.job()
+        pending = job.run()
+        job.close()
+        arg = (pending.compat_dir / "installer-arg.txt").read_text().strip()
+        self.assertEqual(arg, "E:\\" + self.installer.name)
+
+    def test_program_installed_to_d_is_found(self):
+        os.environ["FAKE_TO_D"] = "1"
+        job = self.job()
+        pending = job.run()
+        self.assertTrue(core.is_confident(pending.candidates, pending.installer))
+        top = pending.candidates[0]
+        self.assertEqual(top.exe.name, "CoolGame.exe")
+        app = job.finish(pending, top.exe)
+        self.assertEqual(app.exe, str(self.home.resolve() / "Games/Cool Game/CoolGame.exe"))
+
+    def test_uninstall_program_installed_to_d(self):
+        os.environ["FAKE_TO_D"] = "1"
+        (self.home / "Games").mkdir()  # a standard folder the installer puts things into
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        game_dir = (self.home / "Games" / "Cool Game").resolve()
+        self.assertEqual(app.extra_dirs, [str(game_dir)])
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        self.assertGreater(core.app_size(app), 3_000_000)
+        core.uninstall(app, self.paths, roots=[self.steam])
+        self.assertFalse(game_dir.exists())
+        self.assertTrue((self.home / "Games").exists())  # the standard folder itself is kept
+        self.assertFalse(Path(app.prefix).exists())
+        self.assertFalse(core.in_steam(app, [self.steam]))
+
+    def test_program_dirs(self):
+        h = self.home.resolve()
+        exe = h / "Games/Cool Game/bin/x.exe"
+        self.assertEqual(core.program_dirs(exe, [h / "Games"], h), [h / "Games/Cool Game"])
+        self.assertEqual(core.program_dirs(exe, [h / "Games/Cool Game"], h), [h / "Games/Cool Game"])
+        self.assertEqual(core.program_dirs(h / "CoolGame/x.exe", [h / "CoolGame", h / "Other"], h),
+                         [h / "CoolGame"])
+        self.assertEqual(core.program_dirs(h / "Games/x.exe", [h / "Games"], h), [])
+
+    def test_uninstall_never_deletes_outside_home_or_standard_folders(self):
+        outside = self.tmp / "elsewhere"
+        outside.mkdir()
+        (self.home / "Downloads" / "keep.txt").write_text("x")
+        app = core.App("x", "X", "/x.exe", str(self.tmp / "nope"), "P", "proton", "/p",
+                       extra_dirs=[str(outside), str(self.home), str(self.home / "Downloads"), "/"])
+        self.assertEqual(core.safe_extra_dirs(app), [])
+        core.uninstall(app, self.paths, roots=[self.steam])
+        self.assertTrue(outside.exists())
+        self.assertTrue((self.home / "Downloads" / "keep.txt").exists())
+
+    def test_in_steam_after_removal_in_steam(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        core.remove_steam_shortcut(app.steam_appid, [self.steam])  # the user deleted it in Steam
+        self.assertFalse(core.in_steam(app, [self.steam]))
+        self.assertTrue(Path(app.prefix).exists())  # files are still there until uninstalled
+
+    def test_cancel_restores_nothing_left_behind(self):
+        os.environ["FAKE_SLEEP"] = "30"
+        inst = self.home / "Downloads" / "x.exe"
+        inst.write_bytes(b"MZ")
+        job = core.Installer(inst, self.paths, steam_roots_override=[self.steam])
+        threading.Timer(1.0, job.cancel).start()
+        with self.assertRaises(core.Cancelled):
+            job.run()
+        self.assertEqual(list(self.paths.prefixes.iterdir()), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

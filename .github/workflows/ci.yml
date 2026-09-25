@@ -22,21 +22,12 @@ jobs:
           python -m pip install -r requirements.txt
 
       # PyQt6 wheels link libEGL; ubuntu-latest minimal image does not include it.
-      - name: Install Qt / EGL libraries (headless smoke)
+      - name: Install Qt / EGL libraries
         run: |
           sudo apt-get update
           sudo apt-get install -y libegl1 libgl1 libglib2.0-0 libxkbcommon0 libdbus-1-3
 
-      - name: Component tests
+      - name: Tests (engine + headless UI)
         env:
-          PYTHONIOENCODING: utf-8
-        run: python test_comprehensive.py
-
-      - name: UI import tests
-        run: python test_ui_imports.py
-
-      - name: Headless Qt smoke
-        env:
-          PYTHONPATH: ${{ github.workspace }}
           QT_QPA_PLATFORM: offscreen
-        run: python scripts/wsl_headless_smoke.py
+        run: python -m unittest discover -s tests -t . -v
