@@ -41,7 +41,6 @@ echo "Verifying checksum…"
 
 mkdir -p "$BIN_DIR" "$DESKTOP_DIR"
 install -m 755 "$TMP/$ASSET" "$BIN_DIR/deckhand"
-rm -f "$BIN_DIR/protonlaunch" "$DESKTOP_DIR/protonlaunch.desktop"  # from before the app was called Deckhand
 
 cat > "$DESKTOP_DIR/deckhand.desktop" << DESKTOP
 [Desktop Entry]
