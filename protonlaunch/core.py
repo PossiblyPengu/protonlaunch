@@ -823,6 +823,7 @@ class App:
     workdir: str = ""  # folder to start in ("" = the program's folder)
     steam_requested_at: float = 0.0  # when it was handed to the running Steam (steam_added == "requested")
     kind: str = "program"  # "program" (a Windows program in its own prefix) or "stream" (streaming.py)
+    options: list[str] = field(default_factory=list)  # e.g. "better-xcloud" for Xbox Cloud Gaming
 
     @property
     def runtime(self) -> Runtime:

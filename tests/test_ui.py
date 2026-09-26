@@ -395,17 +395,20 @@ class TestWindow(Env):
         self.win.show_streaming()
         page = self.win.streaming
         self.wait_for(lambda: page.installed is not None)
-        self.assertIn("installs Google Chrome", page.list.item(0).text())
+        self.assertIn("Google Chrome not installed yet", page.list.item(0).text())
+        self.assertIn("Google Chrome ✗", page.on_deck.text())
         self.answers = [0]  # Add to Steam
         page._activate(page.list.item(0))
         self.assertEqual(self.asked[-1], "Add Xbox Cloud Gaming to Steam?")
         self.wait_for(lambda: "In Steam" in page.list.item(0).text())
+        self.wait_for(lambda: "Google Chrome installed" in page.list.item(0).text())  # re-checked after
+        self.assertIn("Google Chrome ✓", page.on_deck.text())
         app = core.Library(self.paths).load()[0]
         self.assertTrue(app.artwork)
         self.win.go_home()
         self.assertFalse(self.win.home.manage_btn.isVisible())  # streams aren't "installed programs"
         self.win.show_streaming()
-        self.answers = [0, 0]  # Remove it; Remove (confirm)
+        self.answers = [1, 0]  # Remove it (after "Turn Better xCloud on"); Remove (confirm)
         page._activate(page.list.item(0))
         self.wait_for(lambda: core.Library(self.paths).load() == [])
         self.assertEqual(core.steam_shortcuts([self.steam]), [])

@@ -34,7 +34,12 @@ Home → **Game streaming** (or ☰ Menu) adds streaming services to your Steam 
 | Xbox Cloud Gaming, GeForce NOW, Amazon Luna, Boosteroid | Full screen in Google Chrome (or Microsoft Edge, if you have it), controller enabled |
 | Moonlight (stream from your gaming PC), chiaki-ng (PlayStation Remote Play) | Their own apps |
 
-Whatever a service needs is installed from Flathub for your user only, so no admin password is needed. Sign in the first time
+**Better xCloud** (optional, for Xbox Cloud Gaming): a free add-on ([redphx/better-xcloud](https://github.com/redphx/better-xcloud))
+for a sharper picture, stream stats, Xbox remote play and mouse & keyboard. Choose **Add with Better xCloud**, or turn it on/off
+later by picking Xbox Cloud Gaming again. It runs in Chromium (Google Chrome no longer lets it be loaded this way), is
+installed without Tampermonkey, and updates itself in the background each time you start it.
+
+The page shows which browsers and apps are already on the Deck, and what each service uses. Whatever a service needs is installed from Flathub for your user only, so no admin password is needed. Sign in the first time
 you open it; leave with STEAM → Exit game. Picking a service again offers to remove it (the browser or app stays).
 
 ## Install (Steam Deck)

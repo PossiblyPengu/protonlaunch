@@ -1,5 +1,5 @@
 {
-  "version": "2.11.0",
-  "sha256": "89991019f96987a39dc05d858ba7c3d87fc17fce6b40cb3f3c45870438ba0434",
-  "notes": "New: Game streaming. Add Xbox Cloud Gaming, GeForce NOW, Amazon Luna, Boosteroid, Moonlight or chiaki-ng to your Steam library in one step: ProtonLaunch installs what's needed from Flathub (no password) and sets up the controller."
+  "version": "2.12.0",
+  "sha256": "c92ff5d644a40dcf5089a25d99fc655f2736d74ae5df58b004af2dd983354768",
+  "notes": "Game streaming: optional Better xCloud for Xbox Cloud Gaming (sharper picture, stats, remote play, mouse & keyboard; installed and kept up to date automatically), and the page now shows which browsers and apps are already installed."
 }

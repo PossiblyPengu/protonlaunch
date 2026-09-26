@@ -841,6 +841,8 @@ class StreamingPage(Page):
         lay.addWidget(label("Pick a service to add it to your Steam library. ProtonLaunch installs what it needs "
                             "(a browser, or the streaming app) and sets up the controller. Sign in the first time "
                             "you open it from Steam; leave with the STEAM button → Exit game.", "dim"))
+        self.on_deck = label("Checking what's installed…", "muted")
+        lay.addWidget(self.on_deck)
         self.list = QListWidget()
         self.list.setIconSize(self.list.iconSize() * 2.5)
         on_choose(self.list, self._activate)
@@ -862,6 +864,10 @@ class StreamingPage(Page):
             it.setData(Qt.ItemDataRole.UserRole, svc.id)
             self.list.addItem(it)
         self.list.setCurrentRow(min(row, self.list.count() - 1))
+        if self.installed is not None:
+            ids = [*streaming.BROWSERS, *(s.app for s in streaming.SERVICES if s.app)]
+            self.on_deck.setText("On this Deck:  " + "   ".join(
+                f"{streaming.app_name(i)} {'✓' if i in self.installed else '✗'}" for i in ids))
         if self.installed is None and not self.win.busy_with_quietly("flatpaks"):
             self.win.run_worker(lambda _s: streaming.installed_apps(), self._got_installed, lambda _m: None,
                                 kind="flatpaks")
@@ -872,15 +878,15 @@ class StreamingPage(Page):
             self.refresh()
 
     def _text(self, svc: streaming.Service, app: core.App | None) -> str:
-        if app is not None:
-            state = STEAM_STATE[self.steam.get(app.id, "out")]
-        elif self.installed is None:
-            state = "…"
-        else:
-            need = streaming.needs(svc, self.installed)
-            state = "Not added" if not need else ("Not added · installs Google Chrome" if svc.is_web
-                                                  else "Not added · installs the app")
-        return f"{svc.name}\n{svc.blurb}  ·  {state}"
+        parts = [svc.blurb, STEAM_STATE[self.steam.get(app.id, "out")] if app is not None else "Not added yet"]
+        bx = bool(app and streaming.BETTER_XCLOUD in app.options)
+        if self.installed is not None:
+            uses = streaming.uses(svc, self.installed, bx)
+            have = "installed" if uses in self.installed else "not installed yet"
+            parts.append(f"{streaming.app_name(uses)} {have}" if svc.is_web else f"app {have}")
+        if bx:
+            parts.append("Better xCloud on")
+        return f"{svc.name}\n" + "  ·  ".join(parts)
 
     def _activate(self, item: QListWidgetItem) -> None:
         svc = streaming.service(item.data(Qt.ItemDataRole.UserRole))
@@ -888,23 +894,50 @@ class StreamingPage(Page):
             return
         app = streaming.app_for(svc, self.win.paths)
         state = self.steam.get(app.id, "out") if app else "out"
+        installed = self.installed or set()
+        xbox = svc.id == "xbox-cloud"
         if app is not None and state in ("in", "sent"):
             where = "is in your Steam library" if state == "in" else "was sent to Steam"
-            if Sheet.ask(self, svc.name, f"{svc.name} {where}. Play it from there.",
-                         ("Remove it", "Close"), primary=1, danger=(0,)) == 0:
+            text = f"{svc.name} {where}. Play it from there."
+            if not xbox:
+                if Sheet.ask(self, svc.name, text, ("Remove it", "Close"), primary=1, danger=(0,)) == 0:
+                    self.win.uninstall(app)
+                return
+            bx = streaming.BETTER_XCLOUD in app.options
+            toggle = "Turn Better xCloud off" if bx else "Turn Better xCloud on"
+            choice = Sheet.ask(self, svc.name, text + "\n\n" + self._bx_note(installed, not bx),
+                               (toggle, "Remove it", "Close"), primary=2, danger=(1,))
+            if choice == 0:
+                self.win.set_up_stream(svc, better_xcloud=not bx)
+            elif choice == 1:
                 self.win.uninstall(app)
             return
-        need = streaming.needs(svc, self.installed or set())
-        what = ""
-        if need == streaming.CHROME:
-            what = "ProtonLaunch installs Google Chrome from Flathub first (a few hundred MB). "
-        elif need:
-            what = f"ProtonLaunch installs {svc.name} from Flathub first. "
-        if Sheet.ask(self, f"Add {svc.name} to Steam?", what + f"Then {svc.name} is in your Steam library, "
-                     "with its own artwork" + (", opening full screen with the controller working."
-                                              if svc.is_web else "."), ("Add to Steam", "Cancel")) != 0:
+        need = streaming.needs(svc, installed)
+        if need:
+            what = f"ProtonLaunch installs {streaming.app_name(need)} from Flathub first (it isn't on this Deck yet). "
+        elif svc.is_web:
+            what = f"It opens in {streaming.app_name(streaming.uses(svc, installed))}, which is already installed. "
+        else:
+            what = f"{svc.name} is already installed. "
+        text = what + f"Then {svc.name} is in your Steam library with its own artwork" + (
+            ", full screen with the controller working." if svc.is_web else ".")
+        if xbox:
+            choice = Sheet.ask(self, f"Add {svc.name} to Steam?", text + "\n\n" + self._bx_note(installed, True),
+                               ("Add to Steam", "Add with Better xCloud", "Cancel"))
+            if choice in (0, 1):
+                self.win.set_up_stream(svc, better_xcloud=choice == 1)
             return
-        self.win.set_up_stream(svc)
+        if Sheet.ask(self, f"Add {svc.name} to Steam?", text, ("Add to Steam", "Cancel")) == 0:
+            self.win.set_up_stream(svc)
+
+    @staticmethod
+    def _bx_note(installed: set[str], turning_on: bool) -> str:
+        if not turning_on:
+            return "Better xCloud is on (better picture, stream stats, remote play, mouse & keyboard…)."
+        chromium = "Chromium is already installed" if streaming.CHROMIUM in installed else \
+            "ProtonLaunch installs Chromium for it (Google Chrome can't load it)"
+        return ("Optional: Better xCloud — a free add-on for a sharper picture, stream stats, Xbox remote play and "
+                f"mouse & keyboard. {chromium}, and it stays up to date by itself.")
 
     def enter(self) -> None:
         self.refresh()
@@ -1368,7 +1401,7 @@ class MainWindow(QMainWindow):
             return
         self.go(self.streaming)
 
-    def set_up_stream(self, svc: streaming.Service) -> None:
+    def set_up_stream(self, svc: streaming.Service, better_xcloud: bool | None = None) -> None:
         page = self.streaming
         page.status.setText(f"Setting up {svc.name}…")
 
@@ -1394,7 +1427,8 @@ class MainWindow(QMainWindow):
             head, _, rest = message.partition("\n\n")
             Sheet.ask(self, f"Couldn't set up {svc.name}", head, ("Close",), detail=rest)
 
-        self.run_worker(lambda status: streaming.set_up(svc, self.paths, status), finished, failed,
+        self.run_worker(lambda status: streaming.set_up(svc, self.paths, status, better_xcloud=better_xcloud),
+                        finished, failed,
                         status=page.status.setText, kind="stream")
 
     def check_leftovers(self) -> None:

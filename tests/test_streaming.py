@@ -82,6 +82,52 @@ class TestStreaming(FlatpakEnv):
         self.assertEqual(core.Library(self.paths).load(), [])
         self.assertEqual(core.steam_shortcuts([self.steam]), [])
 
+    def _fake_bx(self, url):
+        self.assertEqual(url, streaming.BETTER_XCLOUD_URL)
+        return (b"// ==UserScript==\n// @name         Better xCloud\n// @version      6.7.12\n"
+                b"// @match        https://www.xbox.com/*/play*\n// @exclude      https://www.xbox.com/*/x\n"
+                b"// @grant        none\n// ==/UserScript==\n\"use strict\";\n")
+
+    def test_better_xcloud_runs_in_chromium_as_an_extension(self):
+        import json
+        self.flatpak_db.write_text("com.google.Chrome\n")
+        svc = streaming.service("xbox-cloud")
+        app = streaming.set_up(svc, self.paths, roots=[self.steam], better_xcloud=True, fetch=self._fake_bx)
+        self.assertIn("install --user -y --noninteractive flathub org.chromium.Chromium", self.calls())
+        self.assertIn("override --user --filesystem=/run/udev:ro org.chromium.Chromium", self.calls())
+        ext = streaming.better_xcloud_dir()
+        manifest = json.loads((ext / "manifest.json").read_text())
+        self.assertEqual(manifest["version"], "6.7.12")
+        script = manifest["content_scripts"][0]
+        self.assertEqual((script["world"], script["run_at"]), ("MAIN", "document_start"))
+        self.assertEqual(script["matches"], ["https://www.xbox.com/*/play*"])
+        self.assertTrue((ext / "better-xcloud.user.js").read_text().startswith("// ==UserScript=="))
+        launcher = Path(app.launcher).read_text()
+        self.assertIn("flatpak run org.chromium.Chromium --kiosk", launcher)
+        self.assertIn(f"--load-extension={ext}", launcher)
+        self.assertIn("curl -fsL", launcher)  # keeps itself up to date
+        self.assertEqual(app.options, ["better-xcloud"])
+        # Setting it up again keeps the choice; turning it off goes back to Chrome. One shortcut throughout.
+        self.assertEqual(streaming.set_up(svc, self.paths, roots=[self.steam], fetch=self._fake_bx).options,
+                         ["better-xcloud"])
+        app = streaming.set_up(svc, self.paths, roots=[self.steam], better_xcloud=False)
+        self.assertEqual(app.options, [])
+        self.assertIn("flatpak run com.google.Chrome", Path(app.launcher).read_text())
+        self.assertNotIn("load-extension", Path(app.launcher).read_text())
+        self.assertEqual(len(core.steam_shortcuts([self.steam])), 1)
+
+    def test_a_bad_better_xcloud_download_is_refused(self):
+        with self.assertRaises(core.InstallError):
+            streaming.set_up(streaming.service("xbox-cloud"), self.paths, roots=[self.steam], better_xcloud=True,
+                             fetch=lambda url: b"<html>rate limited</html>")
+        self.assertEqual(core.Library(self.paths).load(), [])
+
+    def test_better_xcloud_is_only_for_xbox(self):
+        app = streaming.set_up(streaming.service("geforce-now"), self.paths, roots=[self.steam], better_xcloud=True,
+                               fetch=self._fake_bx)
+        self.assertEqual(app.options, [])
+        self.assertNotIn("load-extension", Path(app.launcher).read_text())
+
     def test_removing_a_service_leaves_nothing_behind(self):
         (self.paths.prefixes).mkdir(parents=True)
         app = streaming.set_up(streaming.service("xbox-cloud"), self.paths, roots=[self.steam])
