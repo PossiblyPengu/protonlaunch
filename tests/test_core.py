@@ -375,7 +375,7 @@ class TestSteamShortcuts(Env):
                    sc(5, "Emu", '"/emu"')]
         (cfg / "shortcuts.vdf").write_bytes(core.vdf_dumps({"shortcuts": {str(i): e for i, e in enumerate(entries)}}))
         self.assertEqual(sorted(core.find_duplicate_shortcuts([self.steam], launchers)), ["Emu", "Emu", "My Game"])
-        n = core.remove_duplicate_shortcuts([self.steam], launchers, keep=[4])  # 4: the id ProtonLaunch uses
+        n = core.remove_duplicate_shortcuts([self.steam], launchers, keep=[4])  # 4: the id Deckhand uses
         self.assertEqual(n, 3)
         left = [(e["appid"], e["AppName"]) for _c, e in core.steam_shortcuts([self.steam])]
         self.assertEqual(left, [(1, "Emu"), (3, "Emu"), (4, "My Game")])
@@ -670,7 +670,7 @@ class TestInstallFlow(Env):
     def test_an_interrupted_install_can_be_finished_later(self):
         job = self.job()
         pending = job.run()
-        job.close()  # ProtonLaunch closed before the program was picked
+        job.close()  # Deckhand closed before the program was picked
         z = pending.pfx / "dosdevices/z:"
         z.unlink()
         z.symlink_to(self.home)  # as if the install was cut off while Z: pointed at home
@@ -868,7 +868,7 @@ class TestInstallFlow(Env):
         subprocess.run(["bash", app.launcher], env=dict(os.environ), capture_output=True, timeout=30)
         self.assertEqual(os.readlink(z), "/")
         log = (self.paths.logs / f"{app.id}-launch.log").read_text()
-        self.assertIn("ProtonLaunch: starting", log)  # each launch leaves a log for troubleshooting
+        self.assertIn("Deckhand: starting", log)  # each launch leaves a log for troubleshooting
         self.assertIn("Proton: ", log)
 
     def test_launcher_explains_missing_proton(self):
@@ -950,7 +950,7 @@ class TestInstallFlow(Env):
 
     def test_never_copies_a_folder_holding_protonlaunch_itself(self):
         os.environ["FAKE_NOTHING"] = "1"
-        job = self.job()  # the installer sits in the folder that also holds ProtonLaunch's data
+        job = self.job()  # the installer sits in the folder that also holds Deckhand's data
         pending = job.run()
         self.assertIsNone(core.portable_folder(pending))
         copied = core.adopt_portable(pending, whole_folder=True)

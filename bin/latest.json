@@ -1,5 +1,5 @@
 {
-  "version": "2.12.0",
-  "sha256": "c92ff5d644a40dcf5089a25d99fc655f2736d74ae5df58b004af2dd983354768",
-  "notes": "Game streaming: optional Better xCloud for Xbox Cloud Gaming (sharper picture, stats, remote play, mouse & keyboard; installed and kept up to date automatically), and the page now shows which browsers and apps are already installed."
+  "version": "3.0.0",
+  "sha256": "fa91627028d0956f4b1920f66b26ca3574c863a084dbd49610d977bd30736ec6",
+  "notes": "ProtonLaunch is now Deckhand, with a new look: sections down the left (Install, Stream, Add-ons, Installed; L1/R1 to switch). New Add-ons: Decky Loader and EmuDeck from their official sources. Streaming now recognises services and apps you set up yourself."
 }

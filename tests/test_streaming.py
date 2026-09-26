@@ -128,6 +128,41 @@ class TestStreaming(FlatpakEnv):
         self.assertEqual(app.options, [])
         self.assertNotIn("load-extension", Path(app.launcher).read_text())
 
+    def test_shortcuts_made_outside_are_recognised(self):
+        entries = [(Path("/c"), e) for e in (
+            {"AppName": "Google Chrome", "Exe": '"flatpak"',
+             "LaunchOptions": "run com.google.Chrome --kiosk https://www.xbox.com/en-US/play"},
+            {"AppName": "GFN", "Exe": "/usr/bin/flatpak", "LaunchOptions": "run com.nvidia.geforcenow"},
+            {"AppName": "Moonlight", "Exe": '"/home/deck/Applications/Moonlight-6.1.0-x86_64.AppImage"'},
+            {"AppName": "Xbox", "Exe": f'"{self.paths.launchers}/stream-xbox-cloud.sh"'},  # ours: not "outside"
+            {"AppName": "Halo", "Exe": '"/x/halo.sh"'},
+        )]
+        found = {svc.id: [e["AppName"] for e in streaming.spots(svc, entries, self.paths.launchers)]
+                 for svc in streaming.SERVICES}
+        self.assertEqual(found, {"xbox-cloud": ["Google Chrome"], "geforce-now": ["GFN"], "amazon-luna": [],
+                                 "boosteroid": [], "moonlight": ["Moonlight"], "chiaki-ng": []})
+
+    def test_an_appimage_or_command_counts_as_installed(self):
+        apps = self.home / "Applications"
+        apps.mkdir()
+        img = apps / "Moonlight-6.1.0-x86_64.AppImage"
+        img.write_text("#!/bin/sh\n")
+        img.chmod(0o755)
+        svc = streaming.service("moonlight")
+        self.assertEqual(streaming.local_copy(svc), str(img))
+        installed = streaming.detect(set())
+        self.assertIn("local:moonlight", installed)
+        self.assertIsNone(streaming.needs(svc, installed))
+        app = streaming.set_up(svc, self.paths, roots=[self.steam])
+        self.assertFalse([c for c in self.calls() if c.startswith("install")])  # nothing downloaded
+        self.assertIn(f"exec {img}", Path(app.launcher).read_text())
+
+    def test_the_native_geforce_now_app_is_used_when_installed(self):
+        self.flatpak_db.write_text("com.nvidia.geforcenow\n")
+        app = streaming.set_up(streaming.service("geforce-now"), self.paths, roots=[self.steam])
+        self.assertFalse([c for c in self.calls() if c.startswith("install")])
+        self.assertIn("exec flatpak run com.nvidia.geforcenow", Path(app.launcher).read_text())
+
     def test_removing_a_service_leaves_nothing_behind(self):
         (self.paths.prefixes).mkdir(parents=True)
         app = streaming.set_up(streaming.service("xbox-cloud"), self.paths, roots=[self.steam])

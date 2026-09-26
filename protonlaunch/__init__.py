@@ -1,3 +1,3 @@
-"""ProtonLaunch — install Windows programs on Steam Deck with one tap."""
+"""Deckhand — install Windows programs and set up game streaming on Steam Deck, straight into Steam."""
 
-__version__ = "2.12.0"
+__version__ = "3.0.0"

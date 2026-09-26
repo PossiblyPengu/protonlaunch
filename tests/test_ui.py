@@ -327,7 +327,7 @@ class TestWindow(Env):
             self.assertEqual(self.asked[-1], "Cool Game")
             self.pump(10)
             self.assertEqual(len(sent), 1)
-            # Steam saves its list, with the shortcut under an id of its own: ProtonLaunch follows it.
+            # Steam saves its list, with the shortcut under an id of its own: Deckhand follows it.
             app = core.Library(self.paths).load()[0]
             vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {
                 "appid": -1234, "AppName": "Cool Game", "Exe": f'"{app.launcher}"'}}}))
@@ -364,7 +364,7 @@ class TestWindow(Env):
         job = core.Installer(self.add_installer("Cool Game Setup.exe", 10), self.paths,
                              steam_roots_override=[self.steam])
         pending = job.run()
-        job.close()  # ProtonLaunch was closed on the pick screen
+        job.close()  # Deckhand was closed on the pick screen
         self.win.go_home()
         self.assertTrue(self.win.home.manage_btn.isVisible())
         self.assertIn("1 unfinished", self.win.home.manage_btn.text())
@@ -391,8 +391,9 @@ class TestWindow(Env):
         os.environ.update(PATH=f"{bindir}:{os.environ['PATH']}", FAKE_FLATPAK_LOG=str(self.tmp / "fp.log"),
                           FAKE_FLATPAK_DB=str(self.tmp / "fp.db"))
         self.win.go_home()
-        self.assertTrue(self.win.home.stream_btn.isVisible())
-        self.win.show_streaming()
+        self.win.on_action("rb")  # R1: next section
+        self.assertIs(self.win.stack.currentWidget(), self.win.streaming)
+        self.assertTrue(self.win.stations["stream"].isChecked())
         page = self.win.streaming
         self.wait_for(lambda: page.installed is not None)
         self.assertIn("Google Chrome not installed yet", page.list.item(0).text())
@@ -412,6 +413,58 @@ class TestWindow(Env):
         page._activate(page.list.item(0))
         self.wait_for(lambda: core.Library(self.paths).load() == [])
         self.assertEqual(core.steam_shortcuts([self.steam]), [])
+
+    def test_a_service_already_in_steam_is_shown_and_not_added_twice(self):
+        vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
+        vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {
+            "appid": 7, "AppName": "Xbox Cloud Gaming", "Exe": '"flatpak"',
+            "LaunchOptions": "run com.microsoft.Edge --kiosk https://www.xbox.com/play"}}}))
+        self.win.show_streaming()
+        page = self.win.streaming
+        self.assertIn("added outside Deckhand", page.list.item(0).text())
+        self.answers = [0]  # Keep what I have
+        page._activate(page.list.item(0))
+        self.pump(10)
+        self.assertEqual(self.asked[-1], "Xbox Cloud Gaming")
+        self.assertEqual(len(core.steam_shortcuts([self.steam])), 1)
+        self.assertEqual(core.Library(self.paths).load(), [])
+
+    def test_installing_something_steam_already_has_warns(self):
+        vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
+        vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {"appid": 7, "AppName": "Cool Game", "Exe": '"/x.exe"'}}}))
+        texts = []
+        from protonlaunch.widgets import Sheet
+        Sheet.ask = staticmethod(lambda parent, title, text="", *a, **k: (texts.append(text), 1)[1])
+        self.win.confirm_install(self.add_installer("Cool Game Setup.exe", 10))
+        self.assertIn("already has “Cool Game”", texts[-1])
+
+    def test_addons_page_shows_status_and_downloads_emudeck(self):
+        from protonlaunch import addons
+        from tests.test_addons import FakeResponse
+        self.win.go_home()
+        for _ in range(2):
+            self.win.on_action("rb")  # R1 twice: Install → Stream → Add-ons
+        page = self.win.addons
+        self.assertIs(self.win.stack.currentWidget(), page)
+        self.assertTrue(self.win.stations["addons"].isChecked())
+        self.assertIn("Decky Loader", page.list.item(0).text())
+        self.assertIn("Not installed", page.list.item(1).text())
+        # Game Mode: Decky's installer needs Desktop Mode.
+        os.environ["XDG_CURRENT_DESKTOP"] = "gamescope"
+        self.answers = [1]
+        page._activate(page.list.item(0))
+        self.assertEqual(self.asked[-1], "Decky Loader")
+        # EmuDeck: download (network faked), then it's offered to open — in Desktop Mode only.
+        orig_release, orig_open = addons.emudeck_release, addons.updater._open
+        addons.emudeck_release = lambda fetch=None: ("2.4.7", "https://example.invalid/EmuDeck.AppImage")
+        addons.updater._open = lambda url, timeout, headers=None: FakeResponse(b"\x7fELF" + b"\0" * 100)
+        try:
+            self.answers = [0, 1]  # Download EmuDeck; (Game Mode) not now
+            page._activate(page.list.item(1))
+            self.wait_for(lambda: (self.home / "Applications/EmuDeck.AppImage").exists())
+            self.wait_for(lambda: "Downloaded" in page.list.item(1).text())
+        finally:
+            addons.emudeck_release, addons.updater._open = orig_release, orig_open
 
     def test_remove_duplicate_shortcuts_only_with_steam_closed(self):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"

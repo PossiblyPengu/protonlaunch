@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-command ProtonLaunch installer for Steam Deck.
+# One-command Deckhand installer for Steam Deck.
 # Downloads the latest prebuilt binary — no pip, pacman, or developer mode needed.
 #
 #   curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/main/get.sh | bash
@@ -14,9 +14,9 @@ DESKTOP_DIR="$HOME/.local/share/applications"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "=== ProtonLaunch Installer ==="
+echo "=== Deckhand Installer ==="
 
-echo "Looking for the newest ProtonLaunch…"
+echo "Looking for the newest Deckhand…"
 BEST_URL="" BEST_VER=""
 for BRANCH in $BRANCHES; do
   # Read files at the branch's current commit: raw.githubusercontent caches branch names for minutes.
@@ -31,21 +31,22 @@ for BRANCH in $BRANCHES; do
 done
 [ -n "$BEST_URL" ] || { echo "Couldn't reach GitHub — check your internet connection."; exit 1; }
 
-echo "Downloading ProtonLaunch $BEST_VER…"
+echo "Downloading Deckhand $BEST_VER…"
 curl -fsSL -o "$TMP/$ASSET.sha256" "$BEST_URL/$ASSET.sha256"
 curl -fL --progress-bar -o "$TMP/$ASSET" "$BEST_URL/$ASSET"
-[ -s "$TMP/$ASSET" ] || { echo "Couldn't download ProtonLaunch — check your internet connection."; exit 1; }
+[ -s "$TMP/$ASSET" ] || { echo "Couldn't download Deckhand — check your internet connection."; exit 1; }
 
 echo "Verifying checksum…"
 (cd "$TMP" && sha256sum -c "$ASSET.sha256")
 
 mkdir -p "$BIN_DIR" "$DESKTOP_DIR"
 install -m 755 "$TMP/$ASSET" "$BIN_DIR/protonlaunch"
+ln -sfn protonlaunch "$BIN_DIR/deckhand"  # the app's name since 3.0
 
 cat > "$DESKTOP_DIR/protonlaunch.desktop" << DESKTOP
 [Desktop Entry]
-Name=ProtonLaunch
-Comment=Install Windows programs and games on Steam Deck
+Name=Deckhand
+Comment=Install Windows programs, game streaming and add-ons on Steam Deck
 Exec=$BIN_DIR/protonlaunch %f
 Icon=applications-games
 Terminal=false
@@ -61,5 +62,5 @@ echo ""
 echo "✓ $("$BIN_DIR/protonlaunch" --version) installed to $BIN_DIR/protonlaunch"
 echo "  Find it in the app menu under Games, or run: $BIN_DIR/protonlaunch"
 echo ""
-echo "Tip: in Desktop Mode you can right-click any setup .exe → Open With → ProtonLaunch."
-echo "To use it from Game Mode, open ProtonLaunch and tap \"Add ProtonLaunch to Steam\"."
+echo "Tip: in Desktop Mode you can right-click any setup .exe → Open With → Deckhand."
+echo "To use it from Game Mode, open Deckhand and tap \"Add Deckhand to Steam\"."

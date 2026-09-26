@@ -18,4 +18,4 @@ import json, sys
 version, sha, notes = sys.argv[1:4]
 print(json.dumps({"version": version, "sha256": sha, "notes": notes}, indent=2))
 PY
-echo "bin/ now holds ProtonLaunch $VERSION ($SHA)"
+echo "bin/ now holds Deckhand $VERSION ($SHA)"

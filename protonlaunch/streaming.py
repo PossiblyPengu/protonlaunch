@@ -7,6 +7,7 @@ App with kind "stream", a launcher script, artwork, and Steam's own add-a-game h
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
@@ -24,7 +25,7 @@ APP_NAMES = {CHROME: "Google Chrome", EDGE: "Microsoft Edge", CHROMIUM: "Chromiu
 
 # Better xCloud (github.com/redphx/better-xcloud): an optional userscript for Xbox Cloud Gaming
 # (better picture, stream stats, remote play, mouse & keyboard…). It needs nothing from a
-# userscript manager (@grant none), so ProtonLaunch wraps it in a tiny browser extension and
+# userscript manager (@grant none), so Deckhand wraps it in a tiny browser extension and
 # loads it with --load-extension. Google Chrome no longer accepts that switch; Chromium does.
 BETTER_XCLOUD = "better-xcloud"
 BETTER_XCLOUD_URL = "https://github.com/redphx/better-xcloud/releases/latest/download/better-xcloud.user.js"
@@ -38,6 +39,10 @@ class Service:
     url: str = ""  # cloud services: the page to open full screen
     app: str = ""  # home streaming: the Flathub app that does it
     args: tuple[str, ...] = ()
+    native: str = ""  # a Flatpak app that does it natively, used instead of the browser if installed
+    local: tuple[str, ...] = ()  # names of a non-Flatpak copy: commands on PATH, or AppImage file names
+    spot: str = ""  # regex that finds this service in a Steam shortcut someone else made
+    color: str = "#555a66"  # badge colour
 
     @property
     def is_web(self) -> bool:
@@ -45,13 +50,18 @@ class Service:
 
 
 SERVICES = (
-    Service("xbox-cloud", "Xbox Cloud Gaming", "Game Pass Ultimate games, streamed", url="https://www.xbox.com/play"),
+    Service("xbox-cloud", "Xbox Cloud Gaming", "Game Pass Ultimate games, streamed", url="https://www.xbox.com/play",
+            spot=r"xbox\.com/(?:[a-z]{2}-[a-z]{2}/)?play|xbox cloud|xcloud", color="#107c10"),
     Service("geforce-now", "GeForce NOW", "Your Steam, Epic and other PC games, streamed",
-            url="https://play.geforcenow.com"),
-    Service("amazon-luna", "Amazon Luna", "Luna+ and Prime Gaming, streamed", url="https://luna.amazon.com"),
-    Service("boosteroid", "Boosteroid", "Your PC games, streamed", url="https://cloud.boosteroid.com"),
-    Service("moonlight", "Moonlight", "Stream from your own gaming PC", app="com.moonlight_stream.Moonlight"),
-    Service("chiaki-ng", "chiaki-ng", "Remote Play from your PlayStation", app="io.github.streetpea.Chiaki4deck"),
+            url="https://play.geforcenow.com", native="com.nvidia.geforcenow", spot=r"geforce ?now|geforcenow", color="#5f9400"),
+    Service("amazon-luna", "Amazon Luna", "Luna+ and Prime Gaming, streamed", url="https://luna.amazon.com",
+            spot=r"luna\.amazon|amazon luna", color="#6b3fd6"),
+    Service("boosteroid", "Boosteroid", "Your PC games, streamed", url="https://cloud.boosteroid.com",
+            spot=r"boosteroid", color="#e0561b"),
+    Service("moonlight", "Moonlight", "Stream from your own gaming PC", app="com.moonlight_stream.Moonlight",
+            local=("moonlight-qt", "moonlight", "Moonlight*.AppImage"), spot=r"moonlight", color="#3f63d8"),
+    Service("chiaki-ng", "chiaki-ng", "Remote Play from your PlayStation", app="io.github.streetpea.Chiaki4deck",
+            local=("chiaki-ng", "chiaki", "chiaki*.AppImage"), spot=r"chiaki", color="#1d4fa3"),
 )
 
 # Full screen at the Deck's resolution, sized for its 7" screen. Kiosk mode has no address bar;
@@ -86,6 +96,49 @@ def installed_apps() -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
+APPIMAGE_DIRS = ("Applications", "AppImages", ".local/bin", "Desktop", "Downloads")
+
+
+def local_copy(svc: Service, home: Path | None = None) -> str | None:
+    """A copy of the service's app installed without Flatpak (a command, or an AppImage)."""
+    import shutil
+
+    home = home or Path.home()
+    for name in svc.local:
+        if "*" in name:
+            for d in APPIMAGE_DIRS:
+                try:
+                    hits = sorted((p for p in (home / d).glob(name) if p.is_file() and os.access(p, os.X_OK)),
+                                  key=lambda p: p.name.lower(), reverse=True)
+                except OSError:
+                    hits = []
+                if hits:
+                    return str(hits[0])
+        elif (found := shutil.which(name)) is not None:
+            return found
+    return None
+
+
+def detect(installed: set[str]) -> set[str]:
+    """Everything the services could run in that's already here: Flatpak ids, plus "local:<service id>"."""
+    return set(installed) | {f"local:{s.id}" for s in SERVICES if s.local and local_copy(s)}
+
+
+def spots(svc: Service, entries: list[tuple[Path, dict]], launchers: Path) -> list[dict]:
+    """Steam shortcuts for this service that were made outside this app (by hand, a guide, another tool)."""
+    if not svc.spot:
+        return []
+    out = []
+    for _cfg, e in entries:
+        exe = str(e.get("Exe", ""))
+        if str(launchers) in exe:
+            continue  # one of ours
+        text = " ".join(str(e.get(k, "")) for k in ("AppName", "appname", "Exe", "LaunchOptions")).lower()
+        if re.search(svc.spot, text) and e not in out:
+            out.append(e)
+    return out
+
+
 def browser(installed: set[str], better_xcloud: bool = False) -> str | None:
     if better_xcloud:
         return CHROMIUM if CHROMIUM in installed else None
@@ -94,21 +147,28 @@ def browser(installed: set[str], better_xcloud: bool = False) -> str | None:
 
 def needs(svc: Service, installed: set[str], better_xcloud: bool = False) -> str | None:
     """The Flathub app that must be installed first, or None."""
-    if svc.is_web:
-        if browser(installed, better_xcloud):
-            return None
-        return CHROMIUM if better_xcloud else CHROME
-    return None if svc.app in installed else svc.app
+    if uses(svc, installed, better_xcloud) in installed:
+        return None
+    return uses(svc, installed, better_xcloud)
 
 
 def uses(svc: Service, installed: set[str], better_xcloud: bool = False) -> str:
-    """The Flathub app the service runs in (installed or not)."""
+    """What the service runs in: a Flatpak id, or "local:<service id>" for a copy installed another way."""
+    if svc.native and svc.native in installed and not better_xcloud:
+        return svc.native
     if svc.is_web:
         return browser(installed, better_xcloud) or (CHROMIUM if better_xcloud else CHROME)
+    if svc.app not in installed and f"local:{svc.id}" in installed:
+        return f"local:{svc.id}"
     return svc.app
 
 
 def app_name(app_id: str) -> str:
+    if app_id.startswith("local:"):
+        svc = service(app_id[6:])
+        return f"{svc.name if svc else app_id[6:]} (not from Flathub)"
+    if app_id == "com.nvidia.geforcenow":
+        return "GeForce NOW app"
     return APP_NAMES.get(app_id) or next((s.name for s in SERVICES if s.app == app_id), app_id)
 
 
@@ -136,7 +196,7 @@ def install_better_xcloud(dest: Path | None = None, fetch: Callable[[str], bytes
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "better-xcloud.user.js").write_text(text, encoding="utf-8")
     manifest = {
-        "manifest_version": 3, "name": "Better xCloud (added by ProtonLaunch)", "version": version,
+        "manifest_version": 3, "name": "Better xCloud (added by Deckhand)", "version": version,
         "description": "github.com/redphx/better-xcloud",
         "content_scripts": [{"matches": matches, "exclude_matches": excludes, "js": ["better-xcloud.user.js"],
                              "run_at": "document_start", "world": "MAIN"}],
@@ -149,7 +209,7 @@ def install_app(app_id: str, log: Callable[[str], None] = lambda s: None) -> Non
     """Install a Flathub app for this user (no admin password), adding Flathub for the user if needed."""
     exe = _flatpak()
     if not exe:
-        raise core.InstallError("Flatpak isn't available on this system, so ProtonLaunch can't install "
+        raise core.InstallError("Flatpak isn't available on this system, so Deckhand can't install "
                                 f"{app_id}.")
     env = core.clean_env()
     subprocess.run([exe, "remote-add", "--user", "--if-not-exists", "flathub", FLATHUB], env=env,
@@ -182,6 +242,11 @@ def allow_controllers(app_id: str) -> None:
 
 
 def command(svc: Service, installed: set[str], better_xcloud: bool = False) -> list[str]:
+    runner = uses(svc, installed, better_xcloud)
+    if runner.startswith("local:"):
+        return [local_copy(svc) or svc.local[0], *svc.args]
+    if runner == svc.native:
+        return ["flatpak", "run", svc.native]
     if svc.is_web:
         b = uses(svc, installed, better_xcloud)
         ext = [f"--load-extension={better_xcloud_dir()}"] if better_xcloud else []
@@ -194,7 +259,7 @@ def write_launcher(svc: Service, paths: core.Paths, installed: set[str], better_
     script = paths.launchers / f"stream-{svc.id}.sh"
     log = paths.logs / f"stream-{svc.id}-launch.log"
     q = shlex.quote
-    lines = ["#!/bin/bash", f"# ProtonLaunch: {svc.name}",
+    lines = ["#!/bin/bash", f"# Deckhand: {svc.name}",
              f"{{ mkdir -p {q(str(log.parent))} && exec >{q(str(log))} 2>&1; }} || true"]
     if better_xcloud:
         d = better_xcloud_dir()
@@ -220,16 +285,16 @@ def set_up(svc: Service, paths: core.Paths, status: Callable[[str], None] = lamb
     if better_xcloud is None:
         better_xcloud = bool(existing and BETTER_XCLOUD in existing.options)
     better_xcloud = better_xcloud and svc.id == "xbox-cloud"
-    installed = installed_apps()
+    installed = detect(installed_apps())
     need = needs(svc, installed, better_xcloud)
     if need:
         status(f"Installing {app_name(need)} from Flathub…")
         install_app(need, lambda line: status(f"Installing {app_name(need)} from Flathub…  {line[:60]}"))
-        installed = installed_apps() | {need}
+        installed = detect(installed_apps()) | {need}
     if better_xcloud:
         status("Installing Better xCloud…")
         install_better_xcloud(fetch=fetch)
-    if svc.is_web:
+    if svc.is_web and uses(svc, installed, better_xcloud) in BROWSERS:
         allow_controllers(uses(svc, installed, better_xcloud))
     status("Adding to Steam…")
     launcher = write_launcher(svc, paths, installed, better_xcloud)

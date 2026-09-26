@@ -1,4 +1,4 @@
-"""Self-update for the downloaded (single-file) ProtonLaunch app.
+"""Self-update for the downloaded (single-file) Deckhand app.
 
 Looks for a newer version in two places, like get.sh: the latest GitHub release, and the
 prebuilt binary kept in the repo (bin/latest.json on main, then the development branch).
@@ -26,7 +26,7 @@ ASSET = "protonlaunch-linux-x86_64"
 API = f"https://api.github.com/repos/{REPO}"
 RELEASE_API = f"{API}/releases/latest"
 RAW = f"https://raw.githubusercontent.com/{REPO}"
-USER_AGENT = "ProtonLaunch-updater"
+USER_AGENT = "Deckhand-updater"
 
 
 @dataclass
@@ -212,7 +212,7 @@ def restart(target: Path, args: list[str] | None = None) -> None:
 def why_no_self_update() -> str:
     if not getattr(sys, "frozen", False):
         return "This copy runs from source — update it with git pull, or reinstall with get.sh."
-    return (f"ProtonLaunch can't replace its own file in {Path(sys.executable).resolve().parent}. "
+    return (f"Deckhand can't replace its own file in {Path(sys.executable).resolve().parent}. "
             "Reinstall it with get.sh, which puts it in ~/.local/bin.")
 
 
@@ -222,7 +222,7 @@ def cli_update(current: str, out=print) -> int:
     if target is None:
         out(why_no_self_update())
         return 1
-    out(f"ProtonLaunch {current}: checking for updates…")
+    out(f"Deckhand {current}: checking for updates…")
     errors: list[Exception] = []
     u = check(current, errors=errors)
     if u is None:

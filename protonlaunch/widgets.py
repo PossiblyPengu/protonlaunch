@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import QEvent, QEventLoop, QRectF, QSize, Qt, QTimer
+from PyQt6.QtCore import QEvent, QEventLoop, QPointF, QRectF, QSize, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import (
     QFrame,
@@ -39,7 +39,7 @@ def button(text: str, obj: str = "", slot: Callable | None = None) -> QPushButto
 
 
 def draw_glyph(p: QPainter, r: QRectF, kind: str, color: QColor) -> None:
-    """Simple vector icons (no icon font needed): 'folder', 'download', 'up', 'disc'."""
+    """Simple vector icons (no icon font needed): 'folder', 'download', 'up', 'signal', 'stack', 'disc'."""
     pen = QPen(color, max(3.0, r.width() * 0.07))
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -70,6 +70,21 @@ def draw_glyph(p: QPainter, r: QRectF, kind: str, color: QColor) -> None:
         p.drawLine(int(x + w / 2), int(y + h * 0.15), int(x + w / 2), int(y + h * 0.85))
         p.drawLine(int(x + w * 0.22), int(y + h * 0.42), int(x + w / 2), int(y + h * 0.15))
         p.drawLine(int(x + w * 0.78), int(y + h * 0.42), int(x + w / 2), int(y + h * 0.15))
+    elif kind == "signal":  # streaming: a dot with waves going out
+        c = QPointF(x + w * 0.2, y + h * 0.8)
+        p.setBrush(color)
+        p.drawEllipse(c, w * 0.07, h * 0.07)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for k in (0.38, 0.62, 0.86):
+            p.drawArc(QRectF(c.x() - w * k, c.y() - h * k, 2 * w * k, 2 * h * k), 0, 90 * 16)
+    elif kind == "stack":  # installed things: three stacked cards
+        for i in range(3):
+            t = y + h * (0.12 + i * 0.26)
+            p.drawRoundedRect(QRectF(x + w * (0.1 + (2 - i) * 0.04), t, w * (0.8 - (2 - i) * 0.08), h * 0.2), 3, 3)
+    elif kind == "plus":  # add-ons: a rounded square with a plus
+        p.drawRoundedRect(r.adjusted(w * 0.08, h * 0.08, -w * 0.08, -h * 0.08), w * 0.18, h * 0.18)
+        p.drawLine(int(x + w / 2), int(y + h * 0.3), int(x + w / 2), int(y + h * 0.7))
+        p.drawLine(int(x + w * 0.3), int(y + h / 2), int(x + w * 0.7), int(y + h / 2))
     else:  # disc
         p.drawEllipse(r.adjusted(w * 0.05, h * 0.05, -w * 0.05, -h * 0.05))
         p.drawEllipse(r.adjusted(w * 0.4, h * 0.4, -w * 0.4, -h * 0.4))
