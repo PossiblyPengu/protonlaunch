@@ -25,6 +25,18 @@ Built for the Deck: full controller support (D-pad/stick to move, **A** select, 
 - **Records DirectX setup errors:** if the installer runs Microsoft's DirectX setup, its own error log is copied into ProtonLaunch's install log. (That setup often reports errors under Proton; Proton already includes DirectX, so programs usually run anyway.)
 - **Keeps the Deck awake while installing** (when the system allows it), so a long install isn't paused by sleep.
 
+## Game streaming
+
+Home → **Game streaming** (or ☰ Menu) adds streaming services to your Steam library, each with its own artwork:
+
+| Service | How it runs |
+| :--- | :--- |
+| Xbox Cloud Gaming, GeForce NOW, Amazon Luna, Boosteroid | Full screen in Google Chrome (or Microsoft Edge, if you have it), controller enabled |
+| Moonlight (stream from your gaming PC), chiaki-ng (PlayStation Remote Play) | Their own apps |
+
+Whatever a service needs is installed from Flathub for your user only, so no admin password is needed. Sign in the first time
+you open it; leave with STEAM → Exit game. Picking a service again offers to remove it (the browser or app stays).
+
 ## Install (Steam Deck)
 
 1. Switch to **Desktop Mode** (hold Power → Switch to Desktop)

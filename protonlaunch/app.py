@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, artwork, core, theme, updater
+from . import __version__, artwork, core, streaming, theme, updater
 from .nav import Nav
 from .widgets import ElideLabel, HintBar, Sheet, Steps, Tile, Toast, breakable, button, draw_glyph, label
 
@@ -254,6 +254,9 @@ class HomePage(Page):
         manage = QHBoxLayout()
         self.manage_btn = button("", slot=lambda: self.win.show_installed())
         manage.addWidget(self.manage_btn)
+        self.stream_btn = button("Game streaming  ·  Xbox Cloud, GeForce NOW, Moonlight…",
+                                 slot=lambda: self.win.show_streaming())
+        manage.addWidget(self.stream_btn)
         manage.addStretch(1)
         lay.addLayout(manage)
         lay.addStretch(1)
@@ -293,7 +296,7 @@ class HomePage(Page):
         else:
             self.note.setText("")
         self.note.setVisible(bool(self.note.text()))
-        count = len(self.win.library.load())
+        count = sum(a.kind == "program" for a in self.win.library.load())
         unfinished = len(core.orphan_prefixes(self.win.paths))
         text = f"Installed programs ({count})  ·  uninstall"
         if unfinished:
@@ -725,7 +728,8 @@ class InstalledPage(Page):
         self.thread: SizesThread | None = None
 
     def refresh(self) -> None:
-        apps = sorted(self.win.library.load(), key=lambda a: a.installed_at, reverse=True)
+        apps = sorted((a for a in self.win.library.load() if a.kind == "program"), key=lambda a: a.installed_at,
+                      reverse=True)  # (streaming services have their own page)
         self.apps = {a.id: a for a in apps}
         roots, running = core.steam_roots(), core.steam_is_running()
         entries = core.steam_shortcuts(roots)  # read Steam's list once per refresh
@@ -818,6 +822,93 @@ class InstalledPage(Page):
     def enter(self) -> None:
         self.refresh()
         (self.list if self.list.isVisible() else self).setFocus()
+
+    def hints(self):
+        return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
+
+
+class StreamingPage(Page):
+    """Cloud gaming and home streaming, set up as Steam shortcuts."""
+
+    title = "Game streaming"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setSpacing(12)
+        lay.addWidget(label("Game streaming", "h1"))
+        lay.addWidget(label("Pick a service to add it to your Steam library. ProtonLaunch installs what it needs "
+                            "(a browser, or the streaming app) and sets up the controller. Sign in the first time "
+                            "you open it from Steam; leave with the STEAM button → Exit game.", "dim"))
+        self.list = QListWidget()
+        self.list.setIconSize(self.list.iconSize() * 2.5)
+        on_choose(self.list, self._activate)
+        lay.addWidget(self.list, 1)
+        self.status = label("", "muted")
+        lay.addWidget(self.status)
+        self.installed: set[str] | None = None  # Flatpak apps; read in the background
+        self.steam: dict[str, str] = {}
+
+    def refresh(self) -> None:
+        apps = {a.id: a for a in self.win.library.load() if a.kind == "stream"}
+        roots, running = core.steam_roots(), core.steam_is_running()
+        entries = core.steam_shortcuts(roots)
+        self.steam = {i: core.steam_state(a, roots, running, entries) for i, a in apps.items()}
+        row = max(0, self.list.currentRow())
+        self.list.clear()
+        for svc in streaming.SERVICES:
+            it = QListWidgetItem(glyph_icon("disc"), self._text(svc, apps.get(f"stream-{svc.id}")))
+            it.setData(Qt.ItemDataRole.UserRole, svc.id)
+            self.list.addItem(it)
+        self.list.setCurrentRow(min(row, self.list.count() - 1))
+        if self.installed is None and not self.win.busy_with_quietly("flatpaks"):
+            self.win.run_worker(lambda _s: streaming.installed_apps(), self._got_installed, lambda _m: None,
+                                kind="flatpaks")
+
+    def _got_installed(self, apps: set[str]) -> None:
+        self.installed = apps
+        if self.win.stack.currentWidget() is self:
+            self.refresh()
+
+    def _text(self, svc: streaming.Service, app: core.App | None) -> str:
+        if app is not None:
+            state = STEAM_STATE[self.steam.get(app.id, "out")]
+        elif self.installed is None:
+            state = "…"
+        else:
+            need = streaming.needs(svc, self.installed)
+            state = "Not added" if not need else ("Not added · installs Google Chrome" if svc.is_web
+                                                  else "Not added · installs the app")
+        return f"{svc.name}\n{svc.blurb}  ·  {state}"
+
+    def _activate(self, item: QListWidgetItem) -> None:
+        svc = streaming.service(item.data(Qt.ItemDataRole.UserRole))
+        if svc is None or self.win.busy_with("stream"):
+            return
+        app = streaming.app_for(svc, self.win.paths)
+        state = self.steam.get(app.id, "out") if app else "out"
+        if app is not None and state in ("in", "sent"):
+            where = "is in your Steam library" if state == "in" else "was sent to Steam"
+            if Sheet.ask(self, svc.name, f"{svc.name} {where}. Play it from there.",
+                         ("Remove it", "Close"), primary=1, danger=(0,)) == 0:
+                self.win.uninstall(app)
+            return
+        need = streaming.needs(svc, self.installed or set())
+        what = ""
+        if need == streaming.CHROME:
+            what = "ProtonLaunch installs Google Chrome from Flathub first (a few hundred MB). "
+        elif need:
+            what = f"ProtonLaunch installs {svc.name} from Flathub first. "
+        if Sheet.ask(self, f"Add {svc.name} to Steam?", what + f"Then {svc.name} is in your Steam library, "
+                     "with its own artwork" + (", opening full screen with the controller working."
+                                              if svc.is_web else "."), ("Add to Steam", "Cancel")) != 0:
+            return
+        self.win.set_up_stream(svc)
+
+    def enter(self) -> None:
+        self.refresh()
+        self.list.setFocus()
 
     def hints(self):
         return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
@@ -940,7 +1031,9 @@ class MainWindow(QMainWindow):
         self.done = DonePage(self)
         self.updating = UpdatePage(self)
         self.installed = InstalledPage(self)
-        for p in (self.home, self.browser, self.progress, self.pick, self.done, self.updating, self.installed):
+        self.streaming = StreamingPage(self)
+        for p in (self.home, self.browser, self.progress, self.pick, self.done, self.updating, self.installed,
+                  self.streaming):
             self.stack.addWidget(p)
 
         self.nav = Nav(QApplication.instance(), self.on_action, busy=lambda: self.thread is not None) \
@@ -1269,6 +1362,41 @@ class MainWindow(QMainWindow):
         self.run_worker(run, finished, lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)),
                         kind="steam")
 
+    def show_streaming(self) -> None:
+        if self.thread is not None:
+            self.flash("Finish the install first")
+            return
+        self.go(self.streaming)
+
+    def set_up_stream(self, svc: streaming.Service) -> None:
+        page = self.streaming
+        page.status.setText(f"Setting up {svc.name}…")
+
+        def finished(app: core.App) -> None:
+            page.status.setText("")
+            page.installed = None  # re-read: something may have been installed
+            self._write_art(app, None)
+            msg = {"live": f"{app.name} is in your Steam library",
+                   "file": f"{app.name} will be in your Steam library when Steam starts",
+                   "requested": f"Sent {app.name} to Steam — look in your library under Non-Steam"}
+            if app.steam_added in msg:
+                self.flash(msg[app.steam_added], ms=5000)
+            elif app.steam_added == "unavailable":
+                Sheet.ask(self, "Couldn't reach Steam", "Steam didn't respond, so nothing was added.\n\n"
+                          + close_steam_first("☰ Menu → Game streaming"), ("Close",))
+            else:
+                Sheet.ask(self, "Couldn't add to Steam", "No Steam account was found on this Deck.", ("Close",))
+            if self.stack.currentWidget() is page:
+                page.refresh()
+
+        def failed(message: str) -> None:
+            page.status.setText("")
+            head, _, rest = message.partition("\n\n")
+            Sheet.ask(self, f"Couldn't set up {svc.name}", head, ("Close",), detail=rest)
+
+        self.run_worker(lambda status: streaming.set_up(svc, self.paths, status), finished, failed,
+                        status=page.status.setText, kind="stream")
+
     def check_leftovers(self) -> None:
         """Offer to delete prefixes left by interrupted installs (sized in the background)."""
         kept = set(self.paths.state().get("kept_leftovers", []))
@@ -1382,7 +1510,7 @@ class MainWindow(QMainWindow):
         """Rewrite launch scripts so programs installed by older versions get current fixes."""
         roots = core.steam_roots()
         for app in self.library.load():
-            if app.launcher and Path(app.prefix).is_dir():
+            if app.kind == "program" and app.launcher and app.prefix and Path(app.prefix).is_dir():
                 try:
                     core.write_launcher(app, self.paths, roots[0] if roots else None, roots)
                 except OSError:
@@ -1405,6 +1533,7 @@ class MainWindow(QMainWindow):
         items = [
             ("Installed programs (uninstall)", self.show_installed),
             ("Check for updates", lambda: self.check_for_updates(manual=True)),
+            ("Game streaming", self.show_streaming),
             ("Add ProtonLaunch to Steam", self.add_self_to_steam),
             ("Remove duplicate Steam shortcuts", self.remove_duplicates),
             ("Look for installers again", look_again),
@@ -1425,6 +1554,23 @@ class MainWindow(QMainWindow):
         self.go(self.installed)
 
     def uninstall(self, app: core.App, size: int | None = None) -> None:
+        if app.kind == "stream":
+            if Sheet.ask(self, f"Remove {app.name}?", "Removes its Steam shortcut and artwork. The browser or app "
+                         "it uses stays installed.", ("Remove", "Keep"), primary=1, danger=(0,)) != 0:
+                return
+
+            def removed(left_in_steam: bool) -> None:
+                self.flash(f"{app.name} removed")
+                if self.stack.currentWidget() is self.streaming:
+                    self.streaming.refresh()
+                if left_in_steam:
+                    Sheet.ask(self, f"{app.name} removed", "Its shortcut is still in your Steam library: "
+                              "ProtonLaunch doesn't change Steam's list while Steam is open.\n\n" + REMOVE_IN_STEAM,
+                              ("Close",))
+
+            self.run_worker(lambda _s: core.uninstall(app, self.paths), removed,
+                            lambda m: Sheet.ask(self, "Couldn't remove", m, ("Close",)), kind="uninstall")
+            return
         extra = core.safe_extra_dirs(app)
         parts = ["the program and anything saved inside its Windows folder (many games keep their saves "
                  "there)"]

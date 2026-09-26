@@ -822,6 +822,7 @@ class App:
     args: list[str] = field(default_factory=list)  # arguments from the program's own shortcut
     workdir: str = ""  # folder to start in ("" = the program's folder)
     steam_requested_at: float = 0.0  # when it was handed to the running Steam (steam_added == "requested")
+    kind: str = "program"  # "program" (a Windows program in its own prefix) or "stream" (streaming.py)
 
     @property
     def runtime(self) -> Runtime:
@@ -1491,6 +1492,8 @@ def safe_extra_dirs(app: App, home: Path | None = None) -> list[Path]:
 
 def app_paths(app: App) -> list[Path]:
     """Everything on disk that belongs to an installed program."""
+    if not app.prefix:  # a streaming service: nothing of its own on disk
+        return []
     return [p for p in [Path(app.prefix), *safe_extra_dirs(app)] if p.exists()]
 
 
@@ -1576,7 +1579,7 @@ def resume_install(paths: Paths, compat: Path, roots: Iterable[Path] | None = No
 def orphan_prefixes(paths: Paths) -> list[Path]:
     """Prefixes no installed program uses: left by installs that were interrupted (ProtonLaunch
     closed or killed mid-install, the Deck turned off…)."""
-    used = {Path(a.prefix).resolve() for a in Library(paths).load()}
+    used = {Path(a.prefix).resolve() for a in Library(paths).load() if a.prefix}
     try:
         dirs = sorted(d for d in paths.prefixes.iterdir() if d.is_dir() and not d.is_symlink())
     except OSError:
@@ -1848,8 +1851,10 @@ def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None, runni
     remove_desktop_entry(app)
     for d in safe_extra_dirs(app):
         shutil.rmtree(d, ignore_errors=True)
-    shutil.rmtree(app.prefix, ignore_errors=True)
-    files = [Path(app.launcher), paths.logs / f"{app.id}.log", *map(Path, app.artwork)]
+    if app.prefix:
+        shutil.rmtree(app.prefix, ignore_errors=True)
+    files = [Path(app.launcher), paths.logs / f"{app.id}.log", paths.logs / f"{app.id}-launch.log",
+             *map(Path, app.artwork)]
     if app.icon:
         files.append(Path(app.icon))
     for f in files:

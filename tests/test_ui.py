@@ -382,6 +382,34 @@ class TestWindow(Env):
         self.assertEqual(app.prefix, str(pending.compat_dir))
         self.assertTrue(core.in_steam(app, [self.steam]))
 
+    def test_streaming_service_added_from_its_page_and_removed_again(self):
+        from tests.test_streaming import FAKE_FLATPAK
+        bindir = self.tmp / "flatpak-bin"
+        bindir.mkdir()
+        (bindir / "flatpak").write_text(FAKE_FLATPAK)
+        (bindir / "flatpak").chmod(0o755)
+        os.environ.update(PATH=f"{bindir}:{os.environ['PATH']}", FAKE_FLATPAK_LOG=str(self.tmp / "fp.log"),
+                          FAKE_FLATPAK_DB=str(self.tmp / "fp.db"))
+        self.win.go_home()
+        self.assertTrue(self.win.home.stream_btn.isVisible())
+        self.win.show_streaming()
+        page = self.win.streaming
+        self.wait_for(lambda: page.installed is not None)
+        self.assertIn("installs Google Chrome", page.list.item(0).text())
+        self.answers = [0]  # Add to Steam
+        page._activate(page.list.item(0))
+        self.assertEqual(self.asked[-1], "Add Xbox Cloud Gaming to Steam?")
+        self.wait_for(lambda: "In Steam" in page.list.item(0).text())
+        app = core.Library(self.paths).load()[0]
+        self.assertTrue(app.artwork)
+        self.win.go_home()
+        self.assertFalse(self.win.home.manage_btn.isVisible())  # streams aren't "installed programs"
+        self.win.show_streaming()
+        self.answers = [0, 0]  # Remove it; Remove (confirm)
+        page._activate(page.list.item(0))
+        self.wait_for(lambda: core.Library(self.paths).load() == [])
+        self.assertEqual(core.steam_shortcuts([self.steam]), [])
+
     def test_remove_duplicate_shortcuts_only_with_steam_closed(self):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
         e = {"appid": 1, "AppName": "Emu", "Exe": '"/emu"', "StartDir": '"/"', "LaunchOptions": ""}

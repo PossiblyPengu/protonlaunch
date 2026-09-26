@@ -1,5 +1,5 @@
 {
-  "version": "2.10.0",
-  "sha256": "2ea8279820f8b9cbc22392d9fce654dca42b6f65ac8c7089cb281efd778f6918",
-  "notes": "Polish: the home screen shows unfinished installs; quitting with an install waiting to be added to Steam asks first; the install screen says to keep ProtonLaunch open; the leftover prompt no longer repeats after you've looked; browsing big folders is much faster."
+  "version": "2.11.0",
+  "sha256": "89991019f96987a39dc05d858ba7c3d87fc17fce6b40cb3f3c45870438ba0434",
+  "notes": "New: Game streaming. Add Xbox Cloud Gaming, GeForce NOW, Amazon Luna, Boosteroid, Moonlight or chiaki-ng to your Steam library in one step: ProtonLaunch installs what's needed from Flathub (no password) and sets up the controller."
 }
