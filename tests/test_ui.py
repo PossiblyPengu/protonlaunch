@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["PROTONLAUNCH_NO_GAMEPAD"] = "1"
+os.environ["DECKHAND_NO_GAMEPAD"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
@@ -16,7 +16,7 @@ try:
 except ImportError:  # pragma: no cover
     QApplication = None
 
-from protonlaunch import core  # noqa: E402
+from deckhand import core  # noqa: E402
 from tests.test_core import Env, bmp_icon, make_lnk, make_pe  # noqa: E402
 
 
@@ -24,15 +24,15 @@ from tests.test_core import Env, bmp_icon, make_lnk, make_pe  # noqa: E402
 class TestWindow(Env):
     @classmethod
     def setUpClass(cls):
-        from protonlaunch import theme
+        from deckhand import theme
         cls.qapp = QApplication.instance() or QApplication([])
         cls.qapp.setStyle("Fusion")
         cls.qapp.setStyleSheet(theme.STYLE)
 
     def setUp(self):
         super().setUp()
-        from protonlaunch import app as app_mod
-        from protonlaunch.widgets import Sheet
+        from deckhand import app as app_mod
+        from deckhand.widgets import Sheet
         self._orig_roots = core.steam_roots
         core.steam_roots = lambda home=None: [self.steam]
         # Sheets are modal; answer them from a queue instead.
@@ -46,10 +46,10 @@ class TestWindow(Env):
         self.win.installer_dirs = [self.downloads]
         self.win.show()
         self.win.activateWindow()
-        self.shots = os.environ.get("PROTONLAUNCH_SCREENSHOTS")
+        self.shots = os.environ.get("DECKHAND_SCREENSHOTS")
 
     def tearDown(self):
-        from protonlaunch.widgets import Sheet
+        from deckhand.widgets import Sheet
         Sheet.ask = self._orig_ask
         core.steam_roots = self._orig_roots
         self.win.nav and self.win.nav.stop()
@@ -136,7 +136,7 @@ class TestWindow(Env):
         self.assertFalse(Path(app.icon).exists())
 
     def test_user_artwork_is_never_overwritten(self):
-        from protonlaunch import artwork
+        from deckhand import artwork
         grid = self.steam / "userdata/12345/config/grid"
         grid.mkdir(parents=True)
         (grid / "123p.jpg").write_bytes(b"mine")
@@ -224,23 +224,23 @@ class TestWindow(Env):
     def test_update_banner_download_and_restart(self):
         import hashlib
         import json
-        from protonlaunch import app as app_mod
-        from protonlaunch import updater
+        from deckhand import app as app_mod
+        from deckhand import updater
         from tests.test_update import NEW_APP, Server
         web = self.tmp / "web" / "bin"
         web.mkdir(parents=True)
         (web / updater.ASSET).write_bytes(NEW_APP)
-        (web / "latest.json").write_text(json.dumps(
+        (web / updater.MANIFEST).write_text(json.dumps(
             {"version": "9.0.0", "sha256": hashlib.sha256(NEW_APP).hexdigest(), "notes": "Shiny new things."}))
         server = Server(self.tmp / "web")
-        target = self.tmp / "installed" / "protonlaunch"
+        target = self.tmp / "installed" / "deckhand"
         target.parent.mkdir()
         target.write_bytes(b"old app")
         restarted = []
         orig = (updater.self_path, updater.restart)
         updater.self_path = lambda: target
         updater.restart = lambda t, args=None: restarted.append(t)
-        os.environ["PROTONLAUNCH_UPDATE_BASE"] = f"{server.url}/bin"
+        os.environ["DECKHAND_UPDATE_BASE"] = f"{server.url}/bin"
         try:
             win = app_mod.MainWindow(self.paths, check_updates=True)  # checks in the background at start
             win.installer_dirs = [self.downloads]
@@ -259,7 +259,7 @@ class TestWindow(Env):
             win.close()
         finally:
             updater.self_path, updater.restart = orig
-            del os.environ["PROTONLAUNCH_UPDATE_BASE"]
+            del os.environ["DECKHAND_UPDATE_BASE"]
             server.close()
 
     def test_uninstall_from_installed_programs(self):
@@ -414,6 +414,35 @@ class TestWindow(Env):
         self.wait_for(lambda: core.Library(self.paths).load() == [])
         self.assertEqual(core.steam_shortcuts([self.steam]), [])
 
+    def test_xbox_dialog_says_which_browser_each_choice_installs(self):
+        from tests.test_streaming import FAKE_FLATPAK
+        from deckhand import streaming
+        from deckhand.widgets import Sheet
+        bindir = self.tmp / "flatpak-bin"
+        bindir.mkdir()
+        (bindir / "flatpak").write_text(FAKE_FLATPAK)
+        (bindir / "flatpak").chmod(0o755)
+        log = self.tmp / "fp.log"
+        os.environ.update(PATH=f"{bindir}:{os.environ['PATH']}", FAKE_FLATPAK_LOG=str(log),
+                          FAKE_FLATPAK_DB=str(self.tmp / "fp.db"))
+        orig = streaming.install_better_xcloud
+        streaming.install_better_xcloud = lambda dest=None, fetch=None: "1.0"
+        texts = []
+        Sheet.ask = staticmethod(lambda parent, title, text="", *a, **k: (texts.append(text), 1)[1])
+        try:
+            self.win.show_streaming()
+            page = self.win.streaming
+            self.wait_for(lambda: page.installed is not None)
+            self.assertIn("or Chromium with Better xCloud", page.list.item(0).text())
+            page._activate(page.list.item(0))  # answers 1: Add with Better xCloud
+            self.assertIn("Add to Steam: opens in Google Chrome (Deckhand installs it", texts[-1])
+            self.assertIn("Add with Better xCloud: opens in Chromium (Deckhand installs it", texts[-1])
+            self.wait_for(lambda: "Better xCloud on (Chromium)" in page.list.item(0).text())
+            installs = [c for c in log.read_text().splitlines() if c.startswith("install")]
+            self.assertEqual(installs, ["install --user -y --noninteractive flathub org.chromium.Chromium"])
+        finally:
+            streaming.install_better_xcloud = orig
+
     def test_a_service_already_in_steam_is_shown_and_not_added_twice(self):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
         vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {
@@ -433,13 +462,13 @@ class TestWindow(Env):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
         vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {"appid": 7, "AppName": "Cool Game", "Exe": '"/x.exe"'}}}))
         texts = []
-        from protonlaunch.widgets import Sheet
+        from deckhand.widgets import Sheet
         Sheet.ask = staticmethod(lambda parent, title, text="", *a, **k: (texts.append(text), 1)[1])
         self.win.confirm_install(self.add_installer("Cool Game Setup.exe", 10))
         self.assertIn("already has “Cool Game”", texts[-1])
 
     def test_addons_page_shows_status_and_downloads_emudeck(self):
-        from protonlaunch import addons
+        from deckhand import addons
         from tests.test_addons import FakeResponse
         self.win.go_home()
         for _ in range(2):
@@ -482,6 +511,37 @@ class TestWindow(Env):
         self.win.remove_duplicates()
         self.assertEqual(self.asked[-1], "No duplicates")
 
+    def test_install_screen_shows_what_has_been_written(self):
+        page = self.win.progress
+        inst = self.add_installer("Big Game Setup.exe", 10)
+        page.reset(inst)
+        page.expected = 4 << 30  # a 4 GB installer
+        page.on_status("Running the installer", "installer")
+        self.assertIsNotNone(page.meter)
+        free = {"v": 100 << 30}
+        page.meter = core.WriteMeter([self.home], now=0.0, free=lambda p: free["v"])
+        free["v"] -= 1 << 30
+        page._show_written(*page.meter.sample(now=10.0))
+        self.assertIn("1.0 GB written", page.written.text())
+        self.assertIn("about 25%", page.written.text())
+        self.assertEqual((page.bar.maximum(), page.bar.value()), (100, 25))
+        page.meter.last_growth -= 120  # nothing written for two minutes: probably waiting for the user
+        page._show_written(*page.meter.sample(now=11.0))
+        self.assertFalse(page.idle.isHidden())
+        self.assertIn("waiting for you", page.idle.text())
+        page.on_status("Finding the installed program…", "scan")
+        self.assertIn("installed", page.written.text())
+        self.assertTrue(page.idle.isHidden())
+        self.assertEqual(page.bar.maximum(), 0)  # busy again
+        page.stop()
+
+    def test_app_icon_is_installed(self):
+        from deckhand import app as app_mod
+        app_mod.ensure_app_icon()
+        for n in (32, 256, 512):
+            self.assertTrue((self.home / f".local/share/icons/hicolor/{n}x{n}/apps/deckhand.png").exists(), n)
+        self.assertFalse(app_mod.app_icon().isNull())
+
     def test_long_paths_never_widen_the_window(self):
         deep = self.downloads.joinpath(*[f"A Rather Long Folder Name Number {i}" for i in range(8)])
         deep.mkdir(parents=True)
@@ -503,7 +563,7 @@ class TestWindow(Env):
         self.win.start_install(inst)
         self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
         texts = []
-        from protonlaunch.widgets import Sheet
+        from deckhand.widgets import Sheet
         Sheet.ask = staticmethod(lambda parent, title, text="", *a, **k: (texts.append(text), 1)[1])
         self.win.confirm_install(inst)
         self.assertIn("already installed this as Cool Game", texts[-1])
@@ -530,7 +590,7 @@ class TestWindow(Env):
         self.assertIs(self.win.stack.currentWidget(), self.win.home)
 
     def test_sheet_is_an_overlay_that_confines_focus(self):
-        from protonlaunch.widgets import Sheet
+        from deckhand.widgets import Sheet
         self.win.go_home()
         results = []
 
@@ -558,8 +618,8 @@ class TestWindow(Env):
         self.assertTrue(self.win.centralWidget().isEnabled())
 
     def test_second_launch_hands_installer_to_the_open_window(self):
-        from protonlaunch.app import SingleInstance
-        name = f"protonlaunch-test-{os.getpid()}"
+        from deckhand.app import SingleInstance
+        name = f"deckhand-test-{os.getpid()}"
         got = []
         inst = SingleInstance()
         inst.listen(got.append, name=name)
@@ -588,7 +648,7 @@ class TestWindow(Env):
     def test_sheet_screenshot(self):
         if not self.shots:
             self.skipTest("screenshots only")
-        from protonlaunch.widgets import Sheet
+        from deckhand.widgets import Sheet
         s = Sheet(self.win, "Install Cool Game?", "/home/deck/Downloads/Cool Game Setup.exe\n\nInstaller: 3.8 GB"
                   "   ·   Free space: 200.1 GB", ("Install", "Cancel"))
         s.show()

@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from protonlaunch import core  # noqa: E402
+from deckhand import core  # noqa: E402
 
 
 def make_lnk(target: str | None, args: str = "", workdir: str = "", relative: str = "") -> bytes:
@@ -166,7 +166,7 @@ class Env(unittest.TestCase):
         self.installer = self.tmp / "setup_cool_game_v1.2.3_(12345).exe"
         self.installer.write_bytes(b"MZ")
         self.home = self.tmp / "home"
-        os.environ.pop("PROTONLAUNCH_NO_CONTAINER", None)
+        os.environ.pop("DECKHAND_NO_CONTAINER", None)
         (self.home / "Downloads").mkdir(parents=True)
         os.environ["HOME"] = str(self.home)
         # Steam is closed unless a test says otherwise (a real one on this machine mustn't matter).
@@ -295,13 +295,13 @@ class TestFindingInstallers(unittest.TestCase):
 
 class TestGamepad(unittest.TestCase):
     def test_nodes(self):
-        from protonlaunch import gamepad
+        from deckhand import gamepad
         text = ("I: Bus=0003\nN: Name=\"Microsoft X-Box 360 pad 0\"\nH: Handlers=event12 js0 \n\n"
                 "I: Bus=0011\nN: Name=\"AT keyboard\"\nH: Handlers=sysrq kbd event3\n")
         self.assertEqual(gamepad.joystick_event_nodes(text), ["/dev/input/event12"])
 
     def test_buttons_hat_and_stick(self):
-        from protonlaunch import gamepad as g
+        from deckhand import gamepad as g
         st = g.PadState()
         self.assertEqual(st.feed(g.EV_KEY, 0x130, 1), [("a", True)])
         self.assertEqual(st.feed(g.EV_KEY, 0x130, 2), [])  # autorepeat ignored
@@ -345,6 +345,37 @@ class TestVdf(unittest.TestCase):
             core.vdf_loads(b"\x00shortcuts\x00\x09x\x00\x08\x08")
 
 
+class TestProgress(unittest.TestCase):
+    def test_write_meter_counts_free_space_going_down(self):
+        free = {"home": 50_000_000_000}
+        m = core.WriteMeter([Path("/"), Path("/")], now=0.0, free=lambda p: free["home"])
+        self.assertEqual(len(m.drives), 1)  # the same drive is counted once
+        free["home"] -= 300 << 20
+        written, rate = m.sample(now=2.0)
+        self.assertEqual(written, 300 << 20)
+        self.assertAlmostEqual(rate, (300 << 20) / 2.0)
+        self.assertEqual(m.idle_for(now=2.0), 0.0)
+        written, rate = m.sample(now=62.0)  # nothing more written for a minute
+        self.assertEqual((written, m.idle_for(now=62.0)), (300 << 20, 60.0))
+        free["home"] += 1 << 30  # something else freed space: never negative
+        self.assertEqual(m.sample(now=63.0)[0], 0)
+
+    def test_install_estimate(self):
+        gb = 1 << 30
+        self.assertEqual(core.install_estimate(gb, 4 * gb), 25)
+        self.assertIsNone(core.install_estimate(5 * gb, 4 * gb))  # outgrew the estimate: no fake numbers
+        self.assertIsNone(core.install_estimate(1 << 20, 50 << 20))  # small installers: nothing to go on
+        self.assertEqual(core.install_estimate(4 * gb - 1, 4 * gb), 99)
+
+    def test_flatpak_progress(self):
+        from deckhand import streaming
+        p = streaming.FlatpakProgress()
+        self.assertIsNone(p.feed("Looking for matches…"))
+        self.assertEqual(p.feed("Installing 1/2… ████▌ 50%  3.1 MB/s  00:10"), 25)
+        self.assertEqual(p.feed("Installing 2/2… ██ 20%  2.0 MB/s"), 60)
+        self.assertEqual(p.feed("Installing 2/2… 100%"), 100)
+
+
 class TestSteamShortcuts(Env):
     def test_add_replace_remove(self):
         cfg = self.steam / "userdata/12345/config"
@@ -357,7 +388,7 @@ class TestSteamShortcuts(Env):
         self.assertEqual([e["AppName"] for e in sc.values()], ["Other", "Cool"])
         self.assertEqual(sc["1"]["appid"] & 0xFFFFFFFF, appid)
         self.assertTrue(appid & 0x80000000)
-        self.assertTrue((cfg / "shortcuts.vdf.protonlaunch-bak").exists())
+        self.assertTrue((cfg / "shortcuts.vdf.deckhand-bak").exists())
         core.remove_steam_shortcut(appid, roots=[self.steam])
         sc = core.vdf_loads((cfg / "shortcuts.vdf").read_bytes())["shortcuts"]
         self.assertEqual([e["AppName"] for e in sc.values()], ["Other"])
@@ -749,7 +780,7 @@ class TestInstallFlow(Env):
         body = ("import sys, urllib.parse, re\n"
                 f"sys.path.insert(0, {str(repo)!r})\n"
                 "from pathlib import Path\n"
-                "from protonlaunch import core\n"
+                "from deckhand import core\n"
                 "url = sys.argv[1]\n"
                 "assert url.startswith('steam://addnonsteamgame/')\n"
                 "text = Path(urllib.parse.unquote(url.split('/', 3)[3])).read_text()\n"
@@ -948,7 +979,7 @@ class TestInstallFlow(Env):
         copied = core.adopt_portable(pending, whole_folder=True)
         self.assertEqual(sorted(p.name for p in copied.parent.iterdir()), ["Tool.exe"])
 
-    def test_never_copies_a_folder_holding_protonlaunch_itself(self):
+    def test_never_copies_a_folder_holding_deckhand_itself(self):
         os.environ["FAKE_NOTHING"] = "1"
         job = self.job()  # the installer sits in the folder that also holds Deckhand's data
         pending = job.run()

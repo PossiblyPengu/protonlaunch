@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from protonlaunch import addons, core  # noqa: E402
+from deckhand import addons, core  # noqa: E402
 from tests.test_core import Env  # noqa: E402
 
 DECKY_SCRIPT = b"#!/bin/bash\n# Decky Installer (fake)\nmkdir -p \"$HOME/homebrew/services\"\n" \

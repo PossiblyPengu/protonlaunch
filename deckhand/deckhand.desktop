@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Deckhand
+Comment=Install Windows programs and games on Steam Deck
+Exec=/home/deck/.local/bin/deckhand %f
+Icon=deckhand
+Terminal=false
+Type=Application
+Categories=Game;Utility;
+MimeType=application/x-ms-dos-executable;application/x-msdownload;application/vnd.microsoft.portable-executable;application/x-msi;application/x-ms-installer;
+StartupNotify=true

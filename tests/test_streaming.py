@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from protonlaunch import core, streaming  # noqa: E402
+from deckhand import core, streaming  # noqa: E402
 from tests.test_core import Env  # noqa: E402
 
 FAKE_FLATPAK = r'''#!/bin/bash
