@@ -959,7 +959,9 @@ class StreamingPage(Page):
             else:
                 parts.append(f"installs {streaming.app_name(uses)}" if svc.is_web else "installs the app")
         if bx:
-            parts.append("Better xCloud on")
+            parts.append("Better xCloud on (Chromium)")
+        elif svc.id == "xbox-cloud" and app is None:
+            parts.append("or Chromium with Better xCloud")
         return f"{svc.name}\n" + "  ·  ".join(parts)
 
     def _activate(self, item: QListWidgetItem) -> None:
@@ -979,7 +981,7 @@ class StreamingPage(Page):
                 return
             bx = streaming.BETTER_XCLOUD in app.options
             toggle = "Turn Better xCloud off" if bx else "Turn Better xCloud on"
-            choice = Sheet.ask(self, svc.name, text + "\n\n" + self._bx_note(installed, not bx),
+            choice = Sheet.ask(self, svc.name, text + "\n\n" + self._bx_note(svc, installed, not bx),
                                (toggle, "Remove it", "Close"), primary=2, danger=(1,))
             if choice == 0:
                 self.win.set_up_stream(svc, better_xcloud=not bx)
@@ -1002,8 +1004,13 @@ class StreamingPage(Page):
             what = f"{svc.name} is already installed. "
         text = what + f"Then {svc.name} is in your Steam library with its own artwork" + (
             ", full screen with the controller working." if svc.is_web else ".")
-        if xbox:
-            choice = Sheet.ask(self, f"Add {svc.name} to Steam?", text + "\n\n" + self._bx_note(installed, True),
+        if xbox:  # two ways, each saying exactly which browser it uses and whether that gets installed
+            text = (f"• Add to Steam: opens in {self._browser_state(svc, installed, False)}.\n"
+                    f"• Add with Better xCloud: opens in {self._browser_state(svc, installed, True)}, with Better "
+                    "xCloud — a free add-on for a sharper picture, stream stats, Xbox remote play and mouse & "
+                    "keyboard. It needs Chromium because Google Chrome can't load it.\n\n"
+                    f"Either way {svc.name} is in your Steam library, full screen with the controller working.")
+            choice = Sheet.ask(self, f"Add {svc.name} to Steam?", text,
                                ("Add to Steam", "Add with Better xCloud", "Cancel"))
             if choice in (0, 1):
                 self.win.set_up_stream(svc, better_xcloud=choice == 1)
@@ -1012,13 +1019,19 @@ class StreamingPage(Page):
             self.win.set_up_stream(svc)
 
     @staticmethod
-    def _bx_note(installed: set[str], turning_on: bool) -> str:
-        if not turning_on:
-            return "Better xCloud is on (better picture, stream stats, remote play, mouse & keyboard…)."
-        chromium = "Chromium is already installed" if streaming.CHROMIUM in installed else \
-            "Deckhand installs Chromium for it (Google Chrome can't load it)"
-        return ("Optional: Better xCloud — a free add-on for a sharper picture, stream stats, Xbox remote play and "
-                f"mouse & keyboard. {chromium}, and it stays up to date by itself.")
+    def _browser_state(svc: streaming.Service, installed: set[str], better_xcloud: bool) -> str:
+        """'Chromium (already installed)' / 'Google Chrome (Deckhand installs it first)'."""
+        b = streaming.uses(svc, installed, better_xcloud)
+        state = "already installed" if b in installed else "Deckhand installs it from Flathub first"
+        return f"{streaming.app_name(b)} ({state})"
+
+    def _bx_note(self, svc: streaming.Service, installed: set[str], turning_on: bool) -> str:
+        if turning_on:
+            return ("Better xCloud is a free add-on for a sharper picture, stream stats, Xbox remote play and mouse & "
+                    f"keyboard. Turning it on switches to {self._browser_state(svc, installed, True)}, because "
+                    "Google Chrome can't load it. It keeps itself up to date.")
+        return (f"Better xCloud is on (it runs in Chromium). Turning it off switches to "
+                f"{self._browser_state(svc, installed, False)}.")
 
     def enter(self) -> None:
         self.refresh()

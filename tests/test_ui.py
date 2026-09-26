@@ -414,6 +414,35 @@ class TestWindow(Env):
         self.wait_for(lambda: core.Library(self.paths).load() == [])
         self.assertEqual(core.steam_shortcuts([self.steam]), [])
 
+    def test_xbox_dialog_says_which_browser_each_choice_installs(self):
+        from tests.test_streaming import FAKE_FLATPAK
+        from protonlaunch import streaming
+        from protonlaunch.widgets import Sheet
+        bindir = self.tmp / "flatpak-bin"
+        bindir.mkdir()
+        (bindir / "flatpak").write_text(FAKE_FLATPAK)
+        (bindir / "flatpak").chmod(0o755)
+        log = self.tmp / "fp.log"
+        os.environ.update(PATH=f"{bindir}:{os.environ['PATH']}", FAKE_FLATPAK_LOG=str(log),
+                          FAKE_FLATPAK_DB=str(self.tmp / "fp.db"))
+        orig = streaming.install_better_xcloud
+        streaming.install_better_xcloud = lambda dest=None, fetch=None: "1.0"
+        texts = []
+        Sheet.ask = staticmethod(lambda parent, title, text="", *a, **k: (texts.append(text), 1)[1])
+        try:
+            self.win.show_streaming()
+            page = self.win.streaming
+            self.wait_for(lambda: page.installed is not None)
+            self.assertIn("or Chromium with Better xCloud", page.list.item(0).text())
+            page._activate(page.list.item(0))  # answers 1: Add with Better xCloud
+            self.assertIn("Add to Steam: opens in Google Chrome (Deckhand installs it", texts[-1])
+            self.assertIn("Add with Better xCloud: opens in Chromium (Deckhand installs it", texts[-1])
+            self.wait_for(lambda: "Better xCloud on (Chromium)" in page.list.item(0).text())
+            installs = [c for c in log.read_text().splitlines() if c.startswith("install")]
+            self.assertEqual(installs, ["install --user -y --noninteractive flathub org.chromium.Chromium"])
+        finally:
+            streaming.install_better_xcloud = orig
+
     def test_a_service_already_in_steam_is_shown_and_not_added_twice(self):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
         vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {

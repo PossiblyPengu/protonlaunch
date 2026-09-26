@@ -1,5 +1,5 @@
 {
-  "version": "3.1.1",
-  "sha256": "d338cb235b7c0072c80efdfd8183518f41d0eb269013e4f052ce6d4d7cde3d49",
-  "notes": "Ready for the repository's new name (PossiblyPengu/deckhand): updates and the install command work under either name, and the command is now deckhand (protonlaunch still works)."
+  "version": "3.1.2",
+  "sha256": "ef39bb600ecc7837bdae1fa5b0c6740d6892725c5d9094fd490026f774d541d1",
+  "notes": "Xbox Cloud Gaming now says exactly which browser each choice uses: Google Chrome normally, Chromium with Better xCloud (Chrome can't load it) \u2014 and only that browser is installed."
 }
