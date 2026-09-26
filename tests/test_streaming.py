@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from protonlaunch import core, streaming  # noqa: E402
+from deckhand import core, streaming  # noqa: E402
 from tests.test_core import Env  # noqa: E402
 
 FAKE_FLATPAK = r'''#!/bin/bash
@@ -162,22 +162,6 @@ class TestStreaming(FlatpakEnv):
         app = streaming.set_up(streaming.service("geforce-now"), self.paths, roots=[self.steam])
         self.assertFalse([c for c in self.calls() if c.startswith("install")])
         self.assertIn("exec flatpak run com.nvidia.geforcenow", Path(app.launcher).read_text())
-
-    def test_launchers_are_rewritten_after_the_data_folder_moved(self):
-        import json
-        self.flatpak_db.write_text("org.chromium.Chromium\n")
-        app = streaming.set_up(streaming.service("xbox-cloud"), self.paths, roots=[self.steam], better_xcloud=True,
-                               fetch=self._fake_bx)
-        launcher = Path(app.launcher)
-        new_bx = streaming.better_xcloud_dir()
-        old_bx = new_bx.with_name("protonlaunch-better-xcloud")
-        new_bx.rename(old_bx)  # as installed by 3.3
-        launcher.write_text(launcher.read_text().replace(str(new_bx), str(old_bx)))
-        self.assertEqual(streaming.migrate(self.paths), 1)
-        self.assertTrue(json.loads((new_bx / "manifest.json").read_text()))
-        self.assertIn(f"--load-extension={new_bx}", launcher.read_text())
-        self.assertNotIn("protonlaunch-better-xcloud", launcher.read_text())
-        self.assertEqual(streaming.migrate(self.paths), 0)
 
     def test_removing_a_service_leaves_nothing_behind(self):
         (self.paths.prefixes).mkdir(parents=True)

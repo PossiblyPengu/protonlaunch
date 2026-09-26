@@ -41,18 +41,18 @@ jobs:
             --clean \
             --onefile \
             --windowed \
-            --name protonlaunch \
+            --name deckhand \
             --paths . \
-            protonlaunch/__main__.py
-          cp dist/protonlaunch protonlaunch-linux-x86_64
-          chmod +x protonlaunch-linux-x86_64
+            deckhand/__main__.py
+          cp dist/deckhand deckhand-linux-x86_64
+          chmod +x deckhand-linux-x86_64
 
       - name: Create checksums
-        run: sha256sum protonlaunch-linux-x86_64 > protonlaunch-linux-x86_64.sha256
+        run: sha256sum deckhand-linux-x86_64 > deckhand-linux-x86_64.sha256
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            protonlaunch-linux-x86_64
-            protonlaunch-linux-x86_64.sha256
+            deckhand-linux-x86_64
+            deckhand-linux-x86_64.sha256

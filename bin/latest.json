@@ -1,5 +1,0 @@
-{
-  "version": "3.4.0",
-  "sha256": "1ac0118a2e645c02be9c89c689d662a98a6d923a1674721559524bbe472e025f",
-  "notes": "Deckhand's folder is now ~/.local/share/deckhand. It's moved automatically on first start (instantly \u2014 same drive); the old name stays as a link so existing Steam shortcuts keep working, and they're repointed while Steam is closed."
-}

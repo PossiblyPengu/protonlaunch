@@ -79,7 +79,7 @@ No pip, pacman, or developer mode needed. The script downloads the prebuilt bina
 
 ## Where things go
 
-Everything lives in `~/.local/share/deckhand` (before 3.4: `~/.local/share/protonlaunch`; Deckhand moves it on its first start and leaves the old name as a link, so older Steam shortcuts keep working until they're repointed — which happens automatically while Steam is closed).
+Everything Deckhand keeps is in `~/.local/share/deckhand`.
 
 
 | What | Where |
@@ -87,7 +87,7 @@ Everything lives in `~/.local/share/deckhand` (before 3.4: `~/.local/share/proto
 | Installed programs (one prefix each) | `~/.local/share/deckhand/prefixes/<name>/pfx/drive_c` |
 | Launch scripts used by Steam | `~/.local/share/deckhand/launchers/` |
 | Install logs, and each program's last launch (`<name>-launch.log`) | `~/.local/share/deckhand/logs/` |
-| Backup of your Steam shortcuts | `…/userdata/<id>/config/shortcuts.vdf.protonlaunch-bak` |
+| Backup of your Steam shortcuts | `…/userdata/<id>/config/shortcuts.vdf.deckhand-bak` |
 
 **Uninstalling:** Home → **Installed programs** (or ☰ Menu → Installed programs). Each program shows its size and
 whether it's still in Steam. Uninstalling deletes its Windows folder (including saves kept inside it), its folder on
@@ -102,8 +102,6 @@ Steam** — or uninstall to free the space.
 
 ## Command line
 
-(`protonlaunch` still works as an alias.)
-
 ```bash
 deckhand                             # open the app
 deckhand ~/Downloads/setup.exe       # open and offer to install that file
@@ -114,17 +112,17 @@ deckhand --update                    # update Deckhand itself
 
 ```bash
 pip install -r requirements.txt         # just PyQt6
-python3 -m protonlaunch                 # run from source
+python3 -m deckhand                 # run from source
 QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -t .
-./protonlaunch/build_onefile.sh         # → dist/protonlaunch
+./deckhand/build_onefile.sh         # → dist/deckhand
 ```
 
 The tests use a fake Proton and fake Steam install, so they run anywhere, including CI. On minimal Linux images PyQt6 needs
-`libegl1 libgl1 libglib2.0-0 libxkbcommon0 libdbus-1-3`. `PROTONLAUNCH_NO_GAMEPAD=1` turns off controller input;
-`PROTONLAUNCH_FULLSCREEN=1` forces full screen outside Game Mode.
+`libegl1 libgl1 libglib2.0-0 libxkbcommon0 libdbus-1-3`. `DECKHAND_NO_GAMEPAD=1` turns off controller input;
+`DECKHAND_FULLSCREEN=1` forces full screen outside Game Mode.
 
-**Shipping a new version:** bump `__version__` in `protonlaunch/__init__.py`, then run
+**Shipping a new version:** bump `__version__` in `deckhand/__init__.py`, then run
 `scripts/publish_bin.sh "one line of release notes"` and commit `bin/`. That rebuilds the binary and writes
-`bin/latest.json`, which `get.sh` and the in-app updater read (from `main`, then the development branch). Pushing a
+`bin/deckhand.json`, which `get.sh` and the in-app updater read (from `main`, then the development branch). Pushing a
 `v*` tag also publishes a GitHub release; the updater checks releases too and takes whichever version is newest.
-`PROTONLAUNCH_UPDATE_BASE=<url of a folder with latest.json>` points the updater elsewhere for testing.
+`DECKHAND_UPDATE_BASE=<url of a folder with deckhand.json>` points the updater elsewhere for testing.

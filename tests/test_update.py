@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from protonlaunch import updater  # noqa: E402
+from deckhand import updater  # noqa: E402
 
 NEW_APP = b"#!/bin/sh\necho new\n" + b"x" * 200_000
 
@@ -53,7 +53,7 @@ class UpdateTests(unittest.TestCase):
         d = self.web / name / "bin"
         d.mkdir(parents=True, exist_ok=True)
         (d / updater.ASSET).write_bytes(NEW_APP)
-        (d / "latest.json").write_text(json.dumps({"version": version, "sha256": sha or self.sha, "notes": notes}))
+        (d / "deckhand.json").write_text(json.dumps({"version": version, "sha256": sha or self.sha, "notes": notes}))
         return lambda: updater.from_manifest(f"{self.server.url}/{name}/bin")
 
     def publish_release(self, tag: str):
@@ -82,7 +82,7 @@ class UpdateTests(unittest.TestCase):
         offline = lambda: updater.from_manifest("http://127.0.0.1:9/bin")  # noqa: E731
         u = updater.check("2.1.0", [old_release, broken, offline, dev, main])
         self.assertEqual((u.version, u.notes), ("2.3.0", "Controller fixes"))
-        self.assertIn(f"/main/bin/{updater.ASSET}?t=", u.url)  # cache-busted, like latest.json
+        self.assertIn(f"/main/bin/{updater.ASSET}?t=", u.url)  # cache-busted, like deckhand.json
         self.assertIsNone(updater.check("2.3.0", [old_release, main, dev]))
         errors = []
         self.assertIsNone(updater.check("2.1.0", [broken, offline], errors=errors))
@@ -107,7 +107,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_download_verify_install(self):
         u = updater.check("2.1.0", [self.publish_branch("main", "2.2.0")])
-        target = self.tmp / "bin" / "protonlaunch"
+        target = self.tmp / "bin" / "deckhand"
         target.parent.mkdir()
         target.write_bytes(b"old")
         seen = []
@@ -145,11 +145,11 @@ class UpdateTests(unittest.TestCase):
 
     def test_env_override_for_testing(self):
         self.publish_branch("main", "9.0.0")
-        os.environ["PROTONLAUNCH_UPDATE_BASE"] = f"{self.server.url}/main/bin"
+        os.environ["DECKHAND_UPDATE_BASE"] = f"{self.server.url}/main/bin"
         try:
             self.assertEqual(updater.check("2.1.0").version, "9.0.0")
         finally:
-            del os.environ["PROTONLAUNCH_UPDATE_BASE"]
+            del os.environ["DECKHAND_UPDATE_BASE"]
 
     def test_cli_from_source(self):
         out = []

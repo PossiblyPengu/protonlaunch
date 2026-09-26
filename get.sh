@@ -5,11 +5,10 @@
 #   curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/deckhand/main/get.sh | bash
 set -euo pipefail
 
-# The repository was called protonlaunch before; either name works.
-REPOS="PossiblyPengu/deckhand PossiblyPengu/protonlaunch"
+REPO="PossiblyPengu/deckhand"
 # main once merged; the development branch until then. DECKHAND_BRANCH picks one explicitly.
-BRANCHES="${DECKHAND_BRANCH:-${PROTONLAUNCH_BRANCH:-main claude/steam-deck-windows-install-mkeivr}}"
-ASSET="protonlaunch-linux-x86_64"
+BRANCHES="${DECKHAND_BRANCH:-main claude/steam-deck-windows-install-mkeivr}"
+ASSET="deckhand-linux-x86_64"
 BIN_DIR="$HOME/.local/bin"
 DESKTOP_DIR="$HOME/.local/share/applications"
 TMP="$(mktemp -d)"
@@ -19,19 +18,16 @@ echo "=== Deckhand Installer ==="
 
 echo "Looking for the newest Deckhand…"
 BEST_URL="" BEST_VER=""
-for REPO in $REPOS; do
-  for BRANCH in $BRANCHES; do
-    # Read files at the branch's current commit: raw.githubusercontent caches branch names for minutes.
-    REF=$(curl -fsSL -H "Accept: application/vnd.github.sha" "https://api.github.com/repos/$REPO/commits/$BRANCH" 2>/dev/null || true)
-    [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || REF="$BRANCH"
-    URL="https://raw.githubusercontent.com/$REPO/$REF/bin"
-    VER=$(curl -fsSL "$URL/latest.json" 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n 1 || true)
-    [ -n "$VER" ] || continue
-    if [ -z "$BEST_VER" ] || [ "$(printf '%s\n%s\n' "$BEST_VER" "$VER" | sort -V | tail -n 1)" = "$VER" ] && [ "$VER" != "$BEST_VER" ]; then
-      BEST_URL="$URL" BEST_VER="$VER"
-    fi
-  done
-  [ -n "$BEST_URL" ] && break  # found under this name
+for BRANCH in $BRANCHES; do
+  # Read files at the branch's current commit: raw.githubusercontent caches branch names for minutes.
+  REF=$(curl -fsSL -H "Accept: application/vnd.github.sha" "https://api.github.com/repos/$REPO/commits/$BRANCH" 2>/dev/null || true)
+  [[ "$REF" =~ ^[0-9a-f]{40}$ ]] || REF="$BRANCH"
+  URL="https://raw.githubusercontent.com/$REPO/$REF/bin"
+  VER=$(curl -fsSL "$URL/deckhand.json" 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' | head -n 1 || true)
+  [ -n "$VER" ] || continue
+  if [ -z "$BEST_VER" ] || [ "$(printf '%s\n%s\n' "$BEST_VER" "$VER" | sort -V | tail -n 1)" = "$VER" ] && [ "$VER" != "$BEST_VER" ]; then
+    BEST_URL="$URL" BEST_VER="$VER"
+  fi
 done
 [ -n "$BEST_URL" ] || { echo "Couldn't reach GitHub — check your internet connection."; exit 1; }
 
@@ -45,8 +41,7 @@ echo "Verifying checksum…"
 
 mkdir -p "$BIN_DIR" "$DESKTOP_DIR"
 install -m 755 "$TMP/$ASSET" "$BIN_DIR/deckhand"
-ln -sfn deckhand "$BIN_DIR/protonlaunch"  # the old command keeps working
-rm -f "$DESKTOP_DIR/protonlaunch.desktop"  # replaced by deckhand.desktop
+rm -f "$BIN_DIR/protonlaunch" "$DESKTOP_DIR/protonlaunch.desktop"  # from before the app was called Deckhand
 
 cat > "$DESKTOP_DIR/deckhand.desktop" << DESKTOP
 [Desktop Entry]

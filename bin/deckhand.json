@@ -1,0 +1,5 @@
+{
+  "version": "4.0.0",
+  "sha256": "26950f2817c9b6f0fcb08ea23dcbbd76fd85c414a755bdaa63f988bb249e73e8",
+  "notes": "Deckhand 4.0: fully renamed \u2014 the app, its command, its download and its folder (~/.local/share/deckhand) are all called deckhand now."
+}
