@@ -1,4 +1,4 @@
-"""ProtonLaunch window: a Steam Deck–first installer. Pick a setup file; the program lands in Steam.
+"""Deckhand window: a Steam Deck–first installer. Pick a setup file; the program lands in Steam.
 
 It is deliberately not a launcher or library — once installed, programs live in Steam.
 """
@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from PyQt6.QtCore import QRectF, QThread, QTimer, QUrl, Qt, pyqtSignal
+from PyQt6.QtCore import QRectF, QSize, QThread, QTimer, QUrl, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPixmap
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from PyQt6.QtWidgets import (
@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QMainWindow,
     QPlainTextEdit,
     QProgressBar,
@@ -33,11 +34,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, artwork, core, theme, updater
+from . import __version__, addons, artwork, core, streaming, theme, updater
 from .nav import Nav
 from .widgets import ElideLabel, HintBar, Sheet, Steps, Tile, Toast, breakable, button, draw_glyph, label
 
-COLUMNS = 5
+COLUMNS = 4  # tiles per row next to the rail
+PAGE_MARGINS = (40, 30, 40, 22)  # every page lines up with the rail's wordmark
 MAX_FOUND = 2 * COLUMNS - 1  # two rows of tiles, the first being "Browse files"
 
 
@@ -84,12 +86,56 @@ def on_choose(lst: QListWidget, handler: Callable[[QListWidgetItem], None]) -> N
     lst.itemActivated.connect(activated)
 
 
-def glyph_icon(kind: str) -> QIcon:
+def add_deckhand_command() -> None:
+    """Copies installed before the rename (~/.local/bin/protonlaunch, updated in the app) also get
+    the `deckhand` command."""
+    if not getattr(sys, "frozen", False):
+        return
+    exe = Path(sys.executable).resolve()
+    link = exe.parent / "deckhand"
+    if exe.name == "protonlaunch" and not link.exists() and not link.is_symlink():
+        try:
+            link.symlink_to(exe.name)
+        except OSError:
+            pass
+
+
+def rename_menu_entry() -> None:
+    """Installs from before the rename have a Desktop Mode menu entry called ProtonLaunch."""
+    entry = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "applications/protonlaunch.desktop"
+    try:
+        text = entry.read_text(encoding="utf-8")
+        if "Name=ProtonLaunch" in text:
+            entry.write_text(text.replace("Name=ProtonLaunch", "Name=Deckhand"), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def glyph_icon(kind: str, color: str = theme.TEXT_DIM) -> QIcon:
     pm = QPixmap(48, 48)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    draw_glyph(p, QRectF(8, 8, 32, 32), kind, QColor(theme.TEXT_DIM))
+    draw_glyph(p, QRectF(8, 8, 32, 32), kind, QColor(color))
+    p.end()
+    return QIcon(pm)
+
+
+def badge_icon(name: str, color: str) -> QIcon:
+    """A rounded square in a service's colour with its initials."""
+    pm = QPixmap(96, 96)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.TextAntialiasing)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(color))
+    p.drawRoundedRect(QRectF(4, 4, 88, 88), 22, 22)
+    f = p.font()
+    f.setPixelSize(36)
+    f.setBold(True)
+    p.setFont(f)
+    p.setPen(QColor("#ffffff"))
+    p.drawText(QRectF(4, 4, 88, 88), Qt.AlignmentFlag.AlignCenter, artwork.initials(name))
     p.end()
     return QIcon(pm)
 
@@ -222,10 +268,10 @@ class HomePage(Page):
         content = QWidget()
         scroll.setWidget(content)
         lay = QVBoxLayout(content)
-        lay.setContentsMargins(40, 26, 40, 26)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         lay.addWidget(label("Install a Windows program", "h1"))
-        lay.addWidget(label("Pick a setup file. ProtonLaunch installs it and adds the program to your "
+        lay.addWidget(label("Pick a setup file. Deckhand installs it and adds the program to your "
                             "Steam library.", "dim"))
         self.banner = QFrame()
         self.banner.setObjectName("banner")
@@ -258,6 +304,7 @@ class HomePage(Page):
         lay.addLayout(manage)
         lay.addStretch(1)
         self.tiles: list[Tile] = []
+        self.icons: dict[tuple[str, float], QImage | None] = {}
 
     def refresh(self) -> None:
         while self.grid.count():
@@ -274,7 +321,9 @@ class HomePage(Page):
         self.tiles = [browse]
         for f in shown:
             when = "Installed" if str(f.path) in installed else ago(f.mtime)
-            t = Tile(core.guess_name(f.path), f"{core.human_size(f.size)} · {when}", glyph="download")
+            icon = self._icon(f)
+            t = Tile(core.guess_name(f.path), f"{core.human_size(f.size)} · {when}", icon=icon,
+                     glyph="" if icon is not None else "download")
             t.setToolTip(str(f.path))
             t.clicked.connect(lambda _c=False, f=f: self.win.confirm_install(f.path))
             self.tiles.append(t)
@@ -293,7 +342,7 @@ class HomePage(Page):
         else:
             self.note.setText("")
         self.note.setVisible(bool(self.note.text()))
-        count = len(self.win.library.load())
+        count = sum(a.kind == "program" for a in self.win.library.load())
         unfinished = len(core.orphan_prefixes(self.win.paths))
         text = f"Installed programs ({count})  ·  uninstall"
         if unfinished:
@@ -301,12 +350,22 @@ class HomePage(Page):
         self.manage_btn.setText(text)
         self.manage_btn.setVisible(count + unfinished > 0)
 
+    def _icon(self, f: core.FoundInstaller) -> QImage | None:
+        """The installer's own icon (cached: installers can be big)."""
+        key = (str(f.path), f.mtime)
+        if key not in self.icons:
+            try:
+                self.icons[key] = artwork.load_exe_icon(f.path)
+            except Exception:  # noqa: BLE001 — a damaged file just gets the plain tile
+                self.icons[key] = None
+        return self.icons[key]
+
     def enter(self) -> None:
         self.refresh()
         (self.tiles[1] if len(self.tiles) > 1 else self.tiles[0]).setFocus()
 
     def show_banner(self, update: updater.Update) -> None:
-        self.banner_text.setText(f"ProtonLaunch {update.version} is available  ·  you have {__version__}")
+        self.banner_text.setText(f"Deckhand {update.version} is available  ·  you have {__version__}")
         self.banner.show()
 
     def hide_banner(self) -> None:
@@ -334,7 +393,7 @@ class BrowserPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         self.heading = label("Choose an installer", "h1")
         lay.addWidget(self.heading)
@@ -432,7 +491,7 @@ class InstallPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 26, 48, 22)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(14)
         self.heading = label("", "h1")
         lay.addWidget(self.heading)
@@ -452,7 +511,7 @@ class InstallPage(Page):
         self.elapsed = label("", "muted")
         self.elapsed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.elapsed)
-        keep_open = label("Keep ProtonLaunch open until this is done. If it does get closed, finish the "
+        keep_open = label("Keep Deckhand open until this is done. If it does get closed, finish the "
                           "install later from Installed programs.", "muted")
         keep_open.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(keep_open)
@@ -526,7 +585,7 @@ class PickPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 26, 48, 22)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(14)
         self.heading = label("Which one is the program?", "h1")
         lay.addWidget(self.heading)
@@ -543,7 +602,8 @@ class PickPage(Page):
         lay.addLayout(row)
         lay.addStretch(1)
         btns = QHBoxLayout()
-        self.portable = button("No install needed — add this file itself", slot=lambda: self.win.use_portable())
+        self.portable = button("No install needed", slot=lambda: self.win.use_portable())
+        self.portable.setToolTip("The file you picked is the program itself: add it as it is")
         btns.addWidget(self.portable)
         btns.addWidget(button("Browse…", slot=lambda: self.win.browse_program_for_pending()))
         btns.addStretch(1)
@@ -563,8 +623,8 @@ class PickPage(Page):
                 where = str(c.exe.parent)
             icon = artwork.load_exe_icon(c.exe)
             it = QListWidgetItem(f"{c.exe.name}\n{where}")
-            if icon is not None:
-                it.setIcon(QIcon(QPixmap.fromImage(icon)))
+            it.setIcon(QIcon(QPixmap.fromImage(icon)) if icon is not None
+                       else badge_icon(c.exe.stem, artwork.accent_color(c.exe.stem).name()))
             it.setData(Qt.ItemDataRole.UserRole, str(c.exe))
             self.list.addItem(it)
         has = bool(cands)
@@ -602,7 +662,7 @@ class DonePage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 30, 48, 26)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(14)
         lay.addStretch(1)
         self.art = QLabel()
@@ -680,7 +740,7 @@ class DonePage(Page):
 
 
 def close_steam_first(then: str = "☰ Menu → Installed programs → Add to Steam") -> str:
-    return ("To add it with Steam closed: in Desktop Mode, exit Steam (Steam menu → Exit), open ProtonLaunch "
+    return ("To add it with Steam closed: in Desktop Mode, exit Steam (Steam menu → Exit), open Deckhand "
             f"from the app menu and use {then}.")
 
 
@@ -700,23 +760,23 @@ def count_names(names: list[str], limit: int = 8) -> str:
 
 
 class InstalledPage(Page):
-    """What ProtonLaunch installed, to uninstall things. Deliberately not a launcher: no Play here."""
+    """What Deckhand installed, to uninstall things. Deliberately not a launcher: no Play here."""
 
     title = "Installed programs"
 
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         lay.addWidget(label("Installed programs", "h1"))
         lay.addWidget(label("Pick a program to uninstall it, or to add it back to Steam. You play them from "
                             "your Steam library.", "dim"))
         self.list = QListWidget()
-        self.list.setIconSize(self.list.iconSize() * 2.5)
+        self.list.setIconSize(QSize(44, 44))
         on_choose(self.list, self._activate)
         lay.addWidget(self.list, 1)
-        self.empty = label("Nothing installed with ProtonLaunch yet.", "muted")
+        self.empty = label("Nothing installed with Deckhand yet.", "muted")
         lay.addWidget(self.empty)
         self.apps: dict[str, core.App] = {}
         self.sizes: dict[str, int] = {}
@@ -725,7 +785,8 @@ class InstalledPage(Page):
         self.thread: SizesThread | None = None
 
     def refresh(self) -> None:
-        apps = sorted(self.win.library.load(), key=lambda a: a.installed_at, reverse=True)
+        apps = sorted((a for a in self.win.library.load() if a.kind == "program"), key=lambda a: a.installed_at,
+                      reverse=True)  # (streaming services have their own page)
         self.apps = {a.id: a for a in apps}
         roots, running = core.steam_roots(), core.steam_is_running()
         entries = core.steam_shortcuts(roots)  # read Steam's list once per refresh
@@ -734,7 +795,8 @@ class InstalledPage(Page):
         for app in apps:
             it = QListWidgetItem(self._text(app))
             icon = artwork.load_icon(app.icon)
-            it.setIcon(QIcon(QPixmap.fromImage(icon)) if icon is not None else glyph_icon("disc"))
+            it.setIcon(QIcon(QPixmap.fromImage(icon)) if icon is not None
+                       else badge_icon(app.name, artwork.accent_color(app.name).name()))
             it.setData(Qt.ItemDataRole.UserRole, app.id)
             self.list.addItem(it)
         busy = self.win.pending.compat_dir if self.win.pending else None
@@ -799,8 +861,8 @@ class InstalledPage(Page):
             return
         if state == "sent":
             choice = Sheet.ask(self, app.name,
-                               f"ProtonLaunch sent this to Steam {ago(app.steam_requested_at)}. Steam hasn't saved "
-                               "its list of shortcuts since, so ProtonLaunch can't check it yet — look in your "
+                               f"Deckhand sent this to Steam {ago(app.steam_requested_at)}. Steam hasn't saved "
+                               "its list of shortcuts since, so Deckhand can't check it yet — look in your "
                                "library under Non-Steam.\n\nOnly send it again if it's not there: otherwise "
                                "you'll get a duplicate.", ("Uninstall", "Send to Steam again", "Cancel"), primary=2)
             if choice == 0:
@@ -823,13 +885,293 @@ class InstalledPage(Page):
         return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
 
 
+class StreamingPage(Page):
+    """Cloud gaming and home streaming, set up as Steam shortcuts."""
+
+    title = "Game streaming"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(*PAGE_MARGINS)
+        lay.setSpacing(12)
+        lay.addWidget(label("Game streaming", "h1"))
+        lay.addWidget(label("Pick a service to add it to Steam. Deckhand installs what it needs and sets up the "
+                            "controller. Sign in the first time you open it; leave with STEAM → Exit game.", "dim"))
+        self.on_deck = label("Checking what's installed…", "muted")
+        lay.addWidget(self.on_deck)
+        self.list = QListWidget()
+        self.list.setIconSize(QSize(44, 44))
+        on_choose(self.list, self._activate)
+        lay.addWidget(self.list, 1)
+        self.status = label("", "muted")
+        lay.addWidget(self.status)
+        self.installed: set[str] | None = None  # Flatpak apps; read in the background
+        self.steam: dict[str, str] = {}
+        self.outside: dict[str, list[dict]] = {}  # service id → its Steam shortcuts made outside this app
+
+    def refresh(self) -> None:
+        apps = {a.id: a for a in self.win.library.load() if a.kind == "stream"}
+        roots, running = core.steam_roots(), core.steam_is_running()
+        entries = core.steam_shortcuts(roots)
+        self.steam = {i: core.steam_state(a, roots, running, entries) for i, a in apps.items()}
+        self.outside = {svc.id: streaming.spots(svc, entries, self.win.paths.launchers) for svc in streaming.SERVICES}
+        row = max(0, self.list.currentRow())
+        self.list.clear()
+        for svc in streaming.SERVICES:
+            it = QListWidgetItem(badge_icon(svc.name, svc.color), self._text(svc, apps.get(f"stream-{svc.id}")))
+            it.setData(Qt.ItemDataRole.UserRole, svc.id)
+            self.list.addItem(it)
+        self.list.setCurrentRow(min(row, self.list.count() - 1))
+        if self.installed is not None:
+            have = [f"{streaming.app_name(b)} {'✓' if b in self.installed else '✗'}" for b in streaming.BROWSERS]
+            for svc in streaming.SERVICES:
+                if svc.native and svc.native in self.installed:
+                    have.append(f"{streaming.app_name(svc.native)} ✓")
+                if svc.app:
+                    ok = svc.app in self.installed or f"local:{svc.id}" in self.installed
+                    have.append(f"{svc.name} {'✓' if ok else '✗'}")
+            self.on_deck.setText("On this Deck:  " + "   ".join(have))
+        if self.installed is None and not self.win.busy_with_quietly("flatpaks"):
+            self.win.run_worker(lambda _s: streaming.detect(streaming.installed_apps()), self._got_installed, lambda _m: None,
+                                kind="flatpaks")
+
+    def _got_installed(self, apps: set[str]) -> None:
+        self.installed = apps
+        if self.win.stack.currentWidget() is self:
+            self.refresh()
+
+    def _text(self, svc: streaming.Service, app: core.App | None) -> str:
+        if app is not None:
+            steam = STEAM_STATE[self.steam.get(app.id, "out")]
+        elif self.outside.get(svc.id):
+            steam = "In Steam (added outside Deckhand)"
+        else:
+            steam = "Not added yet"
+        parts = [svc.blurb, steam]
+        bx = bool(app and streaming.BETTER_XCLOUD in app.options)
+        if self.installed is not None:
+            uses = streaming.uses(svc, self.installed, bx)
+            if uses.startswith("local:") or uses == svc.native:
+                parts.append(f"uses {streaming.app_name(uses)}")
+            elif uses in self.installed:
+                parts.append(f"{streaming.app_name(uses)} ✓" if svc.is_web else "app installed ✓")
+            else:
+                parts.append(f"installs {streaming.app_name(uses)}" if svc.is_web else "installs the app")
+        if bx:
+            parts.append("Better xCloud on")
+        return f"{svc.name}\n" + "  ·  ".join(parts)
+
+    def _activate(self, item: QListWidgetItem) -> None:
+        svc = streaming.service(item.data(Qt.ItemDataRole.UserRole))
+        if svc is None or self.win.busy_with("stream"):
+            return
+        app = streaming.app_for(svc, self.win.paths)
+        state = self.steam.get(app.id, "out") if app else "out"
+        installed = self.installed or set()
+        xbox = svc.id == "xbox-cloud"
+        if app is not None and state in ("in", "sent"):
+            where = "is in your Steam library" if state == "in" else "was sent to Steam"
+            text = f"{svc.name} {where}. Play it from there."
+            if not xbox:
+                if Sheet.ask(self, svc.name, text, ("Remove it", "Close"), primary=1, danger=(0,)) == 0:
+                    self.win.uninstall(app)
+                return
+            bx = streaming.BETTER_XCLOUD in app.options
+            toggle = "Turn Better xCloud off" if bx else "Turn Better xCloud on"
+            choice = Sheet.ask(self, svc.name, text + "\n\n" + self._bx_note(installed, not bx),
+                               (toggle, "Remove it", "Close"), primary=2, danger=(1,))
+            if choice == 0:
+                self.win.set_up_stream(svc, better_xcloud=not bx)
+            elif choice == 1:
+                self.win.uninstall(app)
+            return
+        outside = self.outside.get(svc.id) if app is None else None
+        if outside:
+            names = ", ".join(sorted({str(e.get("AppName", e.get("appname", svc.name))) for e in outside}))
+            if Sheet.ask(self, svc.name, f"{svc.name} is already in your Steam library ({names}), added outside "
+                         "Deckhand. Nothing to do — play it from there.\n\nAdding it here as well would give you a "
+                         "second shortcut.", ("Keep what I have", "Add Deckhand's too"), primary=0) != 1:
+                return
+        need = streaming.needs(svc, installed)
+        if need:
+            what = f"Deckhand installs {streaming.app_name(need)} from Flathub first (it isn't on this Deck yet). "
+        elif svc.is_web:
+            what = f"It opens in {streaming.app_name(streaming.uses(svc, installed))}, which is already installed. "
+        else:
+            what = f"{svc.name} is already installed. "
+        text = what + f"Then {svc.name} is in your Steam library with its own artwork" + (
+            ", full screen with the controller working." if svc.is_web else ".")
+        if xbox:
+            choice = Sheet.ask(self, f"Add {svc.name} to Steam?", text + "\n\n" + self._bx_note(installed, True),
+                               ("Add to Steam", "Add with Better xCloud", "Cancel"))
+            if choice in (0, 1):
+                self.win.set_up_stream(svc, better_xcloud=choice == 1)
+            return
+        if Sheet.ask(self, f"Add {svc.name} to Steam?", text, ("Add to Steam", "Cancel")) == 0:
+            self.win.set_up_stream(svc)
+
+    @staticmethod
+    def _bx_note(installed: set[str], turning_on: bool) -> str:
+        if not turning_on:
+            return "Better xCloud is on (better picture, stream stats, remote play, mouse & keyboard…)."
+        chromium = "Chromium is already installed" if streaming.CHROMIUM in installed else \
+            "Deckhand installs Chromium for it (Google Chrome can't load it)"
+        return ("Optional: Better xCloud — a free add-on for a sharper picture, stream stats, Xbox remote play and "
+                f"mouse & keyboard. {chromium}, and it stays up to date by itself.")
+
+    def enter(self) -> None:
+        self.refresh()
+        self.list.setFocus()
+
+    def hints(self):
+        return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
+
+
+class AddonsPage(Page):
+    """Decky Loader and EmuDeck, installed from their official sources."""
+
+    title = "Add-ons"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(*PAGE_MARGINS)
+        lay.setSpacing(12)
+        lay.addWidget(label("Add-ons", "h1"))
+        lay.addWidget(label("Popular Deck add-ons, downloaded from their official sources and set up with their own "
+                            "installers. Both set themselves up in Desktop Mode.", "dim"))
+        self.list = QListWidget()
+        self.list.setIconSize(QSize(44, 44))
+        on_choose(self.list, self._activate)
+        lay.addWidget(self.list, 1)
+        self.status = label("", "muted")
+        lay.addWidget(self.status)
+
+    def refresh(self) -> None:
+        row = max(0, self.list.currentRow())
+        self.list.clear()
+        for a in addons.ADDONS:
+            it = QListWidgetItem(badge_icon(a.name, a.color),
+                                 f"{a.name}\n{a.blurb}  ·  {addons.status(a)}  ·  from {a.site}")
+            it.setData(Qt.ItemDataRole.UserRole, a.id)
+            self.list.addItem(it)
+        self.list.setCurrentRow(min(row, self.list.count() - 1))
+
+    def _desktop_only(self, a: addons.Addon, what: str) -> None:
+        """In Game Mode: explain, and offer to switch to Desktop Mode."""
+        text = (f"{what} Switch to Desktop Mode, open Deckhand from the app menu (Games) and pick {a.name} "
+                "again.")
+        if addons.can_switch_to_desktop():
+            if Sheet.ask(self, a.name, text, ("Switch to Desktop Mode", "Not now"), primary=1) == 0:
+                addons.switch_to_desktop()
+        else:
+            Sheet.ask(self, a.name, text, ("Close",))
+
+    def _activate(self, item: QListWidgetItem) -> None:
+        a = addons.addon(item.data(Qt.ItemDataRole.UserRole))
+        if a is None or self.win.busy_with("addon"):
+            return
+        if a.id == "decky":
+            self._decky(a)
+        else:
+            self._emudeck(a)
+
+    def _decky(self, a: addons.Addon) -> None:
+        installed = addons.decky_version() is not None
+        if core.in_game_mode():
+            self._desktop_only(a, "Decky's installer asks for your admin password in its own window, so it runs in "
+                                  "Desktop Mode.")
+            return
+        what = ("It offers to update, or to uninstall Decky." if installed else
+                "It lets you pick the release (stable SteamOS) or prerelease (beta SteamOS) version.")
+        if Sheet.ask(self, "Decky Loader", "Deckhand downloads Decky's own installer (github.com/SteamDeckHomebrew — "
+                     f"the one decky.xyz links to) and opens it. {what}\n\nIt asks for your admin password. If you "
+                     "haven't set one, it offers to use a temporary one and removes it afterwards.",
+                     ("Open Decky's installer", "Cancel")) != 0:
+            return
+        self.status.setText("Downloading Decky's installer…")
+
+        def run(status):
+            script = addons.fetch_decky_installer(self.win.paths.root / "downloads")
+            status("Decky's installer is open — follow its windows.")
+            return addons.run_decky_installer(script)
+
+        def finished(_rc) -> None:
+            self.status.setText("")
+            v = addons.decky_version()
+            self.win.flash(f"Decky Loader {v}" if v and v != "installed" else
+                           "Decky Loader is installed" if v else "Decky Loader isn't installed", ms=5000)
+            self.refresh()
+
+        self.win.run_worker(run, finished, self._failed("Decky Loader"), status=self.status.setText, kind="addon")
+
+    def _emudeck(self, a: addons.Addon) -> None:
+        have = addons.emudeck_app() is not None
+        if have:
+            choice = Sheet.ask(self, "EmuDeck", f"EmuDeck is {addons.status(a).lower()}. Open it to set up or "
+                               "change your emulators, or get its newest version.",
+                               ("Open EmuDeck", "Update EmuDeck", "Cancel"))
+            if choice == 0:
+                self._open_emudeck(a)
+            elif choice == 1:
+                self._download_emudeck(a)
+            return
+        if Sheet.ask(self, "EmuDeck", "Deckhand downloads EmuDeck the way its own installer does (the latest version "
+                     "from EmuDeck's GitHub releases, into your Applications folder). EmuDeck then sets up emulators, "
+                     "your ROMs folders and Steam shortcuts.", ("Download EmuDeck", "Cancel")) == 0:
+            self._download_emudeck(a)
+
+    def _download_emudeck(self, a: addons.Addon) -> None:
+        self.status.setText("Downloading EmuDeck…")
+
+        def run(status):
+            def progress(done: int, total: int) -> None:
+                if total:
+                    status(f"Downloading EmuDeck…  {core.human_size(done)} of {core.human_size(total)}")
+            return addons.download_emudeck(progress)
+
+        def finished(version: str) -> None:
+            self.status.setText("")
+            self.refresh()
+            self.win.flash(f"EmuDeck {version} downloaded" if version else "EmuDeck downloaded")
+            self._open_emudeck(a)
+
+        self.win.run_worker(run, finished, self._failed("EmuDeck"), status=self.status.setText, kind="addon")
+
+    def _open_emudeck(self, a: addons.Addon) -> None:
+        if core.in_game_mode():
+            self._desktop_only(a, "EmuDeck sets itself up in Desktop Mode.")
+            return
+        try:
+            addons.open_emudeck()
+            self.win.flash("EmuDeck is opening…")
+        except (OSError, core.InstallError) as e:
+            Sheet.ask(self, "EmuDeck", str(e), ("Close",))
+
+    def _failed(self, name: str):
+        def failed(message: str) -> None:
+            self.status.setText("")
+            head, _, rest = message.partition("\n\n")
+            Sheet.ask(self, f"Couldn't set up {name}", head, ("Close",), detail=rest)
+            self.refresh()
+        return failed
+
+    def enter(self) -> None:
+        self.refresh()
+        self.list.setFocus()
+
+    def hints(self):
+        return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
+
+
 class UpdatePage(Page):
     title = "Update"
 
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 30, 48, 26)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(14)
         self.heading = label("", "h1")
         lay.addWidget(self.heading)
@@ -847,7 +1189,7 @@ class UpdatePage(Page):
         row.addStretch(1)
         self.cancel_btn = button("Cancel", "danger", self.back)
         row.addWidget(self.cancel_btn)
-        self.restart_btn = button("Restart ProtonLaunch", "primary", lambda: self.win.restart_after_update())
+        self.restart_btn = button("Restart Deckhand", "primary", lambda: self.win.restart_after_update())
         self.restart_btn.setMinimumWidth(260)
         row.addWidget(self.restart_btn)
         row.addStretch(1)
@@ -856,7 +1198,7 @@ class UpdatePage(Page):
 
     def reset(self, update: updater.Update) -> None:
         self.finished = False
-        self.heading.setText(f"Updating to ProtonLaunch {update.version}")
+        self.heading.setText(f"Updating to Deckhand {update.version}")
         self.notes.setText(update.notes)
         self.notes.setVisible(bool(update.notes))
         self.status.setText("Downloading…")
@@ -917,16 +1259,21 @@ class MainWindow(QMainWindow):
         self.update_thread: UpdateDownloadThread | None = None
         self.workers: set[QThread] = set()
 
-        self.setWindowTitle("ProtonLaunch")
+        self.setWindowTitle("Deckhand")
         self.resize(1280, 800)
         self.setAcceptDrops(True)
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
-        v = QVBoxLayout(root)
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self._rail())
+        main = QWidget()
+        outer.addWidget(main, 1)
+        v = QVBoxLayout(main)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        v.addWidget(self._top_bar())
         self.stack = QStackedWidget()
         v.addWidget(self.stack, 1)
         self.hint_bar = HintBar()
@@ -940,14 +1287,22 @@ class MainWindow(QMainWindow):
         self.done = DonePage(self)
         self.updating = UpdatePage(self)
         self.installed = InstalledPage(self)
-        for p in (self.home, self.browser, self.progress, self.pick, self.done, self.updating, self.installed):
+        self.streaming = StreamingPage(self)
+        self.addons = AddonsPage(self)
+        for p in (self.home, self.browser, self.progress, self.pick, self.done, self.updating, self.installed,
+                  self.streaming, self.addons):
             self.stack.addWidget(p)
 
+        for lst in self.findChildren(QListWidget):
+            lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            lst.setWordWrap(True)
         self.nav = Nav(QApplication.instance(), self.on_action, busy=lambda: self.thread is not None) \
             if use_nav else None
         # A bound method (not a lambda): Qt disconnects it automatically when the window goes away.
         QApplication.instance().focusChanged.connect(self._focus_changed)
         self.refresh_launchers()
+        rename_menu_entry()
+        add_deckhand_command()
         self.sync_steam_ids()
         self.go(self.home)
         dupes = core.find_duplicate_shortcuts(None, self.paths.launchers)
@@ -961,25 +1316,78 @@ class MainWindow(QMainWindow):
             self.check_for_updates(manual=False)
 
     # chrome
-    def _top_bar(self) -> QWidget:
-        bar = QFrame()
-        bar.setObjectName("topbar")
-        bar.setFixedHeight(64)
-        bar.setStyleSheet(f"QFrame#topbar {{ background: {theme.BG_RAISED}; border-bottom: 1px solid {theme.LINE}; }}")
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(28, 0, 20, 0)
-        h.setSpacing(14)
-        h.addWidget(label("⚡ ProtonLaunch", "h2", wrap=False))
-        self.crumb = label("", "muted", wrap=False)
-        h.addWidget(self.crumb)
-        h.addStretch(1)
-        self.space = label("", "chip", wrap=False)
-        h.addWidget(self.space, 0, Qt.AlignmentFlag.AlignVCenter)
-        menu = button("☰", "flat", self.open_menu)
+    SECTIONS = ("install", "stream", "addons", "installed")
+
+    def _rail(self) -> QWidget:
+        """Deckhand's sections down the left: tap them, or switch with L1/R1."""
+        rail = QFrame()
+        rail.setObjectName("rail")
+        rail.setFixedWidth(206)
+        v = QVBoxLayout(rail)
+        v.setContentsMargins(0, 22, 0, 18)
+        v.setSpacing(4)
+        mark = QLabel(f'deckhand<span style="color:{theme.ACCENT}">.</span>')
+        mark.setObjectName("wordmark")
+        mark.setContentsMargins(24, 0, 0, 18)
+        v.addWidget(mark)
+        self.stations: dict[str, QPushButton] = {}
+        for key, text, glyph in (("install", "Install", "download"), ("stream", "Stream", "signal"),
+                                 ("addons", "Add-ons", "plus"), ("installed", "Installed", "stack")):
+            b = QPushButton(text)
+            b.setObjectName("station")
+            b.setCheckable(True)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setIcon(glyph_icon(glyph))
+            b.setIconSize(QSize(26, 26))
+            b.clicked.connect(lambda _c=False, k=key: self.switch_section(k))
+            v.addWidget(b)
+            self.stations[key] = b
+        v.addStretch(1)
+        menu = QPushButton("Menu")
+        menu.setObjectName("station")
         menu.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        menu.setToolTip("Menu")
-        h.addWidget(menu)
-        return bar
+        menu.setIcon(glyph_icon("menu"))
+        menu.setIconSize(QSize(26, 26))
+        menu.clicked.connect(lambda _c=False: self.open_menu())
+        v.addWidget(menu)
+        v.addSpacing(12)
+        self.space = label("", "muted", wrap=False)
+        self.space.setContentsMargins(24, 0, 0, 2)
+        v.addWidget(self.space)
+        for text in ("L1 / R1 to switch", f"Deckhand {__version__}"):
+            foot = label(text, "muted", wrap=False)
+            foot.setContentsMargins(24, 0, 0, 0)
+            v.addWidget(foot)
+        self.crumb = QLabel()  # (the page's own heading says where you are)
+        return rail
+
+    def section_of(self, page: QWidget) -> str | None:
+        if page is self.streaming:
+            return "stream"
+        if page is self.addons:
+            return "addons"
+        if page is self.installed:
+            return "installed"
+        if page is self.updating:
+            return None
+        return "install"
+
+    def switch_section(self, key: str) -> None:
+        current = self.section_of(self.stack.currentWidget())
+        if key == current and self.stack.currentWidget() in (self.home, self.streaming, self.addons, self.installed):
+            self._sync_stations()
+            return
+        if self.thread is not None or self.pending is not None or self.stack.currentWidget() is self.updating:
+            self.flash("Finish what's running first")
+            self._sync_stations()
+            return
+        {"install": self.go_home, "stream": self.show_streaming, "addons": self.show_addons,
+         "installed": self.show_installed}[key]()
+
+    def _sync_stations(self) -> None:
+        current = self.section_of(self.stack.currentWidget())
+        for key, b in self.stations.items():
+            b.setChecked(key == current)
 
     def _focus_changed(self, _old, _new) -> None:
         self.update_hints()
@@ -996,7 +1404,8 @@ class MainWindow(QMainWindow):
 
     def go(self, page: Page) -> None:
         self.stack.setCurrentWidget(page)
-        self.crumb.setText(f"›  {page.title}" if page.title else "")
+        self.crumb.setText(page.title or "Install a Windows program")
+        self._sync_stations()
         self.refresh_space()
         page.enter()
         self.update_hints()
@@ -1022,11 +1431,10 @@ class MainWindow(QMainWindow):
             page.x()
         elif action in ("start", "select"):
             self.open_menu()
-        elif action in ("lb", "rb"):
-            area = page.scroll_area()
-            if area:
-                sb = area.verticalScrollBar()
-                sb.setValue(sb.value() + (-1 if action == "lb" else 1) * area.viewport().height() * 3 // 4)
+        elif action in ("lb", "rb"):  # previous / next section, like tabs
+            current = self.section_of(page) or "install"
+            i = self.SECTIONS.index(current) + (-1 if action == "lb" else 1)
+            self.switch_section(self.SECTIONS[i % len(self.SECTIONS)])
 
     def flash(self, text: str, ms: int = 2600) -> None:
         self.toast.show_message(text, ms)
@@ -1053,13 +1461,19 @@ class MainWindow(QMainWindow):
         if before is not None:
             notes.append(f"You already installed this as {before.name} ({ago(before.installed_at)}). "
                          "Installing again makes a second copy.")
+        else:
+            words = core._words(name)
+            same = next((str(e.get("AppName", "")) for _c, e in core.steam_shortcuts()
+                         if words and core._words(str(e.get("AppName", ""))) == words), None)
+            if same:
+                notes.append(f"Your Steam library already has “{same}” — it may already be installed.")
         if size_b and free_b < size_b * 2:
             notes.append("Free space looks tight — installed games usually take more room than their "
                          "installer.")
         text = (f"{breakable(installer)}\n\nInstaller: {core.human_size(size_b)}   ·   "
                 f"Free space: {core.human_size(free_b)}\n\n")
         text += "\n".join(f"⚠  {n}" for n in notes) + ("\n\n" if notes else "")
-        text += ("The installer opens next — click through it as usual. ProtonLaunch then finds the program "
+        text += ("The installer opens next — click through it as usual. Deckhand then finds the program "
                  "and adds it to Steam.")
         if Sheet.ask(self, f"Install {name}?", text, ("Install", "Cancel")) == 0:
             self.start_install(installer)
@@ -1113,7 +1527,7 @@ class MainWindow(QMainWindow):
         self.progress.stop()
         self.go_home()
         if message == "NO_RUNTIME":
-            if Sheet.ask(self, "Proton is needed", "ProtonLaunch uses Proton to run Windows installers. Steam "
+            if Sheet.ask(self, "Proton is needed", "Deckhand uses Proton to run Windows installers. Steam "
                          "can download it for you — try again when it's done.", ("Install Proton", "Close")) == 0:
                 QDesktopServices.openUrl(QUrl(f"steam://install/{core.PROTON_EXPERIMENTAL_APPID}"))
             return
@@ -1269,6 +1683,48 @@ class MainWindow(QMainWindow):
         self.run_worker(run, finished, lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)),
                         kind="steam")
 
+    def show_addons(self) -> None:
+        if self.thread is not None:
+            self.flash("Finish the install first")
+            return
+        self.go(self.addons)
+
+    def show_streaming(self) -> None:
+        if self.thread is not None:
+            self.flash("Finish the install first")
+            return
+        self.go(self.streaming)
+
+    def set_up_stream(self, svc: streaming.Service, better_xcloud: bool | None = None) -> None:
+        page = self.streaming
+        page.status.setText(f"Setting up {svc.name}…")
+
+        def finished(app: core.App) -> None:
+            page.status.setText("")
+            page.installed = None  # re-read: something may have been installed
+            self._write_art(app, None)
+            msg = {"live": f"{app.name} is in your Steam library",
+                   "file": f"{app.name} will be in your Steam library when Steam starts",
+                   "requested": f"Sent {app.name} to Steam — look in your library under Non-Steam"}
+            if app.steam_added in msg:
+                self.flash(msg[app.steam_added], ms=5000)
+            elif app.steam_added == "unavailable":
+                Sheet.ask(self, "Couldn't reach Steam", "Steam didn't respond, so nothing was added.\n\n"
+                          + close_steam_first("☰ Menu → Game streaming"), ("Close",))
+            else:
+                Sheet.ask(self, "Couldn't add to Steam", "No Steam account was found on this Deck.", ("Close",))
+            if self.stack.currentWidget() is page:
+                page.refresh()
+
+        def failed(message: str) -> None:
+            page.status.setText("")
+            head, _, rest = message.partition("\n\n")
+            Sheet.ask(self, f"Couldn't set up {svc.name}", head, ("Close",), detail=rest)
+
+        self.run_worker(lambda status: streaming.set_up(svc, self.paths, status, better_xcloud=better_xcloud),
+                        finished, failed,
+                        status=page.status.setText, kind="stream")
+
     def check_leftovers(self) -> None:
         """Offer to delete prefixes left by interrupted installs (sized in the background)."""
         kept = set(self.paths.state().get("kept_leftovers", []))
@@ -1290,7 +1746,7 @@ class MainWindow(QMainWindow):
             if len(left) > 8:
                 names += f"\n…and {len(left) - 8} more"
             choice = Sheet.ask(self, "Unfinished installs",
-                               f"These are left over from installs that didn't finish (for example, ProtonLaunch "
+                               f"These are left over from installs that didn't finish (for example, Deckhand "
                                f"was closed during the install). Nothing in Steam uses them.\n\n{names}\n\n"
                                f"Delete them to free {core.human_size(total)}, or look at them one by one — an "
                                "install that got far enough can still be finished.",
@@ -1316,11 +1772,11 @@ class MainWindow(QMainWindow):
             return
         name = core.load_install_info(compat).get("name") or compat.name
         if core.prefix_in_use(compat):
-            Sheet.ask(self, name, "Its installer is still running (ProtonLaunch was closed while it ran). Let it "
+            Sheet.ask(self, name, "Its installer is still running (Deckhand was closed while it ran). Let it "
                       "finish, then come back here to add the program to Steam.", ("Close",))
             return
         freed = f" and free {core.human_size(size)}" if size else ""
-        choice = Sheet.ask(self, name, "This install didn't finish: ProtonLaunch was closed before the program "
+        choice = Sheet.ask(self, name, "This install didn't finish: Deckhand was closed before the program "
                            f"was added to Steam. Finish setting it up, or delete it{freed}.",
                            ("Finish setup", "Delete", "Cancel"), primary=0, danger=(1,))
         if choice == 1:
@@ -1367,7 +1823,7 @@ class MainWindow(QMainWindow):
         if running:
             Sheet.ask(self, "Close Steam first", found + "\n\nSteam is open, and would put them back the next time "
                       "it saves its list. To remove them all at once: in Desktop Mode, exit Steam (Steam menu → "
-                      "Exit), open ProtonLaunch from the app menu and pick ☰ Menu → Remove duplicate Steam "
+                      "Exit), open Deckhand from the app menu and pick ☰ Menu → Remove duplicate Steam "
                       "shortcuts again.\n\nOr one at a time: " + REMOVE_IN_STEAM, ("Close",))
             return
         if Sheet.ask(self, "Remove duplicate shortcuts?", found + "\n\nOne of each stays. A backup of Steam's list "
@@ -1382,7 +1838,7 @@ class MainWindow(QMainWindow):
         """Rewrite launch scripts so programs installed by older versions get current fixes."""
         roots = core.steam_roots()
         for app in self.library.load():
-            if app.launcher and Path(app.prefix).is_dir():
+            if app.kind == "program" and app.launcher and app.prefix and Path(app.prefix).is_dir():
                 try:
                     core.write_launcher(app, self.paths, roots[0] if roots else None, roots)
                 except OSError:
@@ -1398,18 +1854,17 @@ class MainWindow(QMainWindow):
             self.flash("Checked Downloads, Desktop and SD cards")
 
         def about() -> None:
-            Sheet.ask(self, f"ProtonLaunch {__version__}",
+            Sheet.ask(self, f"Deckhand {__version__}",
                       "Installs Windows programs and games on Steam Deck and adds them to your Steam library.\n\n"
                       f"Installed programs: {self.paths.prefixes}\nInstall logs: {self.paths.logs}", ("Close",))
 
         items = [
-            ("Installed programs (uninstall)", self.show_installed),
             ("Check for updates", lambda: self.check_for_updates(manual=True)),
-            ("Add ProtonLaunch to Steam", self.add_self_to_steam),
+            ("Add Deckhand to Steam", self.add_self_to_steam),
             ("Remove duplicate Steam shortcuts", self.remove_duplicates),
             ("Look for installers again", look_again),
             ("About", about),
-            ("Quit ProtonLaunch", self.close),
+            ("Quit Deckhand", self.close),
             ("Close", None),
         ]
         choice = Sheet.ask(self, "Menu", "", tuple(t for t, _ in items), primary=len(items) - 1)
@@ -1425,6 +1880,23 @@ class MainWindow(QMainWindow):
         self.go(self.installed)
 
     def uninstall(self, app: core.App, size: int | None = None) -> None:
+        if app.kind == "stream":
+            if Sheet.ask(self, f"Remove {app.name}?", "Removes its Steam shortcut and artwork. The browser or app "
+                         "it uses stays installed.", ("Remove", "Keep"), primary=1, danger=(0,)) != 0:
+                return
+
+            def removed(left_in_steam: bool) -> None:
+                self.flash(f"{app.name} removed")
+                if self.stack.currentWidget() is self.streaming:
+                    self.streaming.refresh()
+                if left_in_steam:
+                    Sheet.ask(self, f"{app.name} removed", "Its shortcut is still in your Steam library: "
+                              "Deckhand doesn't change Steam's list while Steam is open.\n\n" + REMOVE_IN_STEAM,
+                              ("Close",))
+
+            self.run_worker(lambda _s: core.uninstall(app, self.paths), removed,
+                            lambda m: Sheet.ask(self, "Couldn't remove", m, ("Close",)), kind="uninstall")
+            return
         extra = core.safe_extra_dirs(app)
         parts = ["the program and anything saved inside its Windows folder (many games keep their saves "
                  "there)"]
@@ -1454,7 +1926,7 @@ class MainWindow(QMainWindow):
                 else:
                     self.go_home()
             if left_in_steam:
-                Sheet.ask(self, msg, "Its shortcut is still in your Steam library: ProtonLaunch doesn't change "
+                Sheet.ask(self, msg, "Its shortcut is still in your Steam library: Deckhand doesn't change "
                           "Steam's list while Steam is open (Steam would undo it or duplicate it).\n\n"
                           + REMOVE_IN_STEAM, ("Close",))
 
@@ -1483,7 +1955,7 @@ class MainWindow(QMainWindow):
             self.update_info = update
             if manual or not self.update_dismissed:
                 self.home.show_banner(update)
-            if manual and Sheet.ask(self, f"ProtonLaunch {update.version} is available",
+            if manual and Sheet.ask(self, f"Deckhand {update.version} is available",
                                     (update.notes + "\n\n" if update.notes else "") + f"You have {__version__}.",
                                     ("Update now", "Later")) == 0:
                 self.start_update()
@@ -1491,14 +1963,14 @@ class MainWindow(QMainWindow):
             Sheet.ask(self, "Couldn't check for updates", "GitHub couldn't be reached. Check that the Deck is "
                       "online and try again.", ("Close",))
         elif manual:
-            Sheet.ask(self, "You're up to date", f"ProtonLaunch {__version__} is the latest version.", ("Close",))
+            Sheet.ask(self, "You're up to date", f"Deckhand {__version__} is the latest version.", ("Close",))
 
     def start_update(self) -> None:
         target = updater.self_path()
         if self.update_info is None or target is None or self.update_thread is not None:
             return
         if self.thread is not None:
-            Sheet.ask(self, "Finish the install first", "ProtonLaunch can update once the current install is "
+            Sheet.ask(self, "Finish the install first", "Deckhand can update once the current install is "
                       "done.", ("Close",))
             return
         self.updating.reset(self.update_info)
@@ -1527,7 +1999,7 @@ class MainWindow(QMainWindow):
     def on_update_failed(self, message: str) -> None:
         self.go_home()
         if message:
-            Sheet.ask(self, "Update failed", f"{message}\n\nProtonLaunch wasn't changed.", ("Close",))
+            Sheet.ask(self, "Update failed", f"{message}\n\nDeckhand wasn't changed.", ("Close",))
         else:
             self.flash("Update cancelled")
 
@@ -1542,21 +2014,21 @@ class MainWindow(QMainWindow):
     def add_self_to_steam(self) -> None:
         exe = Path(sys.executable if getattr(sys, "frozen", False) else Path.home() / ".local/bin/protonlaunch")
         if not exe.exists():
-            Sheet.ask(self, "Add to Steam", "Install ProtonLaunch with get.sh first.", ("Close",))
+            Sheet.ask(self, "Add to Steam", "Install Deckhand with get.sh first.", ("Close",))
             return
         if core.find_shortcut(str(exe)):
-            Sheet.ask(self, "Add to Steam", "ProtonLaunch is already in your Steam library.", ("Close",))
+            Sheet.ask(self, "Add to Steam", "Deckhand is already in your Steam library.", ("Close",))
             return
         sent = self.paths.state().get("self_steam_requested_at", 0)
         if sent and core.steam_is_running() and core.shortcuts_saved_at() < sent:
-            if Sheet.ask(self, "Add to Steam", f"ProtonLaunch was sent to Steam {ago(sent)}. Steam hasn't saved its "
-                         "list of shortcuts since, so ProtonLaunch can't check it yet — look in your library under "
+            if Sheet.ask(self, "Add to Steam", f"Deckhand was sent to Steam {ago(sent)}. Steam hasn't saved its "
+                         "list of shortcuts since, so Deckhand can't check it yet — look in your library under "
                          "Non-Steam.\n\nOnly send it again if it's not there: otherwise you'll get a duplicate.",
                          ("Close", "Send again")) != 1:
                 return
         if self.busy_with("steam"):
             return
-        self.flash("Adding ProtonLaunch to Steam…")
+        self.flash("Adding Deckhand to Steam…")
         started = time.time()
 
         def finished(result) -> None:
@@ -1564,16 +2036,16 @@ class MainWindow(QMainWindow):
             if how == "requested":
                 self.paths.remember(self_steam_requested_at=started)
             if how in ("live", "file", "requested"):
-                artwork.write_steam_artwork(appid, "ProtonLaunch", None, core.steam_grid_dirs())
-            msg = {"live": "Done — ProtonLaunch is in your Steam library.",
-                   "file": "Done — ProtonLaunch will be in your Steam library when Steam starts.",
+                artwork.write_steam_artwork(appid, "Deckhand", None, core.steam_grid_dirs())
+            msg = {"live": "Done — Deckhand is in your Steam library.",
+                   "file": "Done — Deckhand will be in your Steam library when Steam starts.",
                    "requested": "Sent to Steam — look in your library under Non-Steam.",
                    "unavailable": "Steam didn't respond, so nothing was added.\n\n"
-                                  + close_steam_first("☰ Menu → Add ProtonLaunch to Steam"),
+                                  + close_steam_first("☰ Menu → Add Deckhand to Steam"),
                    }.get(how, "No Steam account found on this device.")
             Sheet.ask(self, "Add to Steam", msg, ("Close",))
 
-        self.run_worker(lambda _s: core.add_shortcut("ProtonLaunch", str(exe), str(exe.parent)), finished,
+        self.run_worker(lambda _s: core.add_shortcut("Deckhand", str(exe), str(exe.parent)), finished,
                         lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)), kind="steam")
 
     def open_files(self, files: list[str]) -> None:
@@ -1636,21 +2108,21 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     args = argv[1:]
     if "--version" in args:
-        print(f"ProtonLaunch {__version__}")
+        print(f"Deckhand {__version__}")
         return 0
     if "-h" in args or "--help" in args:
         print("usage: protonlaunch [INSTALLER.exe|.msi]\n"
               "       protonlaunch --update\n\n"
-              "Opens ProtonLaunch. Given an installer, asks to install it right away.\n"
-              "--update downloads and installs the newest ProtonLaunch.")
+              "Opens Deckhand. Given an installer, asks to install it right away.\n"
+              "--update downloads and installs the newest Deckhand.")
         return 0
     if "--update" in args:
         return updater.cli_update(__version__)
     app = QApplication(argv[:1])
-    app.setApplicationName("ProtonLaunch")
+    app.setApplicationName("Deckhand")
     files = [str(Path(a).resolve()) for a in args if not a.startswith("-")]
     if SingleInstance.hand_off(files):
-        print("ProtonLaunch is already open — passed it on.")
+        print("Deckhand is already open — passed it on.")
         return 0
     app.setStyle("Fusion")
     app.setStyleSheet(theme.STYLE)
@@ -1667,7 +2139,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 class SingleInstance:
-    """One ProtonLaunch at a time: a second launch hands its installer to the open window.
+    """One Deckhand at a time: a second launch hands its installer to the open window.
 
     Two windows installing at once would race on the same records and prefixes."""
 

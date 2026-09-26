@@ -1,4 +1,4 @@
-"""Self-update for the downloaded (single-file) ProtonLaunch app.
+"""Self-update for the downloaded (single-file) Deckhand app.
 
 Looks for a newer version in two places, like get.sh: the latest GitHub release, and the
 prebuilt binary kept in the repo (bin/latest.json on main, then the development branch).
@@ -20,13 +20,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-REPO = "PossiblyPengu/protonlaunch"
+REPO = "PossiblyPengu/deckhand"
+OLD_REPO = "PossiblyPengu/protonlaunch"  # the name before 3.1; GitHub redirects it, but ask it directly too
 BRANCHES = ("main", "claude/steam-deck-windows-install-mkeivr")
-ASSET = "protonlaunch-linux-x86_64"
+ASSET = "protonlaunch-linux-x86_64"  # kept: copies from before the rename download this name
 API = f"https://api.github.com/repos/{REPO}"
 RELEASE_API = f"{API}/releases/latest"
 RAW = f"https://raw.githubusercontent.com/{REPO}"
-USER_AGENT = "ProtonLaunch-updater"
+USER_AGENT = "Deckhand-updater"
 
 
 @dataclass
@@ -134,7 +135,12 @@ def default_sources() -> list[Callable[[], Update | None]]:
     override = os.environ.get("PROTONLAUNCH_UPDATE_BASE")  # for testing: a folder URL with latest.json
     if override:
         return [lambda: from_manifest(override.rstrip("/"))]
-    return [from_release] + [lambda b=b: from_branch(b) for b in BRANCHES]
+    out: list[Callable[[], Update | None]] = []
+    for repo in (REPO, OLD_REPO):  # whichever name the repository has right now
+        api, raw = f"https://api.github.com/repos/{repo}", f"https://raw.githubusercontent.com/{repo}"
+        out.append(lambda api=api: from_release(f"{api}/releases/latest"))
+        out += [lambda b=b, api=api, raw=raw: from_branch(b, api, raw) for b in BRANCHES]
+    return out
 
 
 def check(current: str, sources: list[Callable[[], Update | None]] | None = None,
@@ -212,7 +218,7 @@ def restart(target: Path, args: list[str] | None = None) -> None:
 def why_no_self_update() -> str:
     if not getattr(sys, "frozen", False):
         return "This copy runs from source — update it with git pull, or reinstall with get.sh."
-    return (f"ProtonLaunch can't replace its own file in {Path(sys.executable).resolve().parent}. "
+    return (f"Deckhand can't replace its own file in {Path(sys.executable).resolve().parent}. "
             "Reinstall it with get.sh, which puts it in ~/.local/bin.")
 
 
@@ -222,7 +228,7 @@ def cli_update(current: str, out=print) -> int:
     if target is None:
         out(why_no_self_update())
         return 1
-    out(f"ProtonLaunch {current}: checking for updates…")
+    out(f"Deckhand {current}: checking for updates…")
     errors: list[Exception] = []
     u = check(current, errors=errors)
     if u is None:

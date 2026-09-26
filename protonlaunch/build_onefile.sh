@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build a self-contained single-file ProtonLaunch executable.
+# Build a self-contained single-file Deckhand executable.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

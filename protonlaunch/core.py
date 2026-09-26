@@ -1,4 +1,4 @@
-"""ProtonLaunch engine: pick a runtime, run an installer, find the program, add it to Steam.
+"""Deckhand engine: pick a runtime, run an installer, find the program, add it to Steam.
 
 Nothing in here imports Qt, so it can be tested headless and reused from the CLI.
 """
@@ -822,6 +822,8 @@ class App:
     args: list[str] = field(default_factory=list)  # arguments from the program's own shortcut
     workdir: str = ""  # folder to start in ("" = the program's folder)
     steam_requested_at: float = 0.0  # when it was handed to the running Steam (steam_added == "requested")
+    kind: str = "program"  # "program" (a Windows program in its own prefix) or "stream" (streaming.py)
+    options: list[str] = field(default_factory=list)  # e.g. "better-xcloud" for Xbox Cloud Gaming
 
     @property
     def runtime(self) -> Runtime:
@@ -854,7 +856,7 @@ class Library:
 
     @contextlib.contextmanager
     def _locked(self):
-        """One writer at a time, even across two ProtonLaunch windows."""
+        """One writer at a time, even across two Deckhand windows."""
         self.paths.root.mkdir(parents=True, exist_ok=True)
         with open(self.paths.root / "library.lock", "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -939,7 +941,7 @@ def sleep_inhibitor() -> list[str]:
     global _INHIBIT
     if _INHIBIT is None:
         exe = shutil.which("systemd-inhibit")
-        cmd = [exe, "--what=sleep:idle", "--who=ProtonLaunch", "--why=Installing a Windows program",
+        cmd = [exe, "--what=sleep:idle", "--who=Deckhand", "--why=Installing a Windows program",
                "--mode=block"] if exe else []
         if cmd:
             try:
@@ -1040,11 +1042,11 @@ def write_launcher(
     run = " ".join([q(app.exe), *(q(a) for a in app.args), '"$@"'])
     lines = [
         "#!/bin/bash",
-        "# ProtonLaunch launcher for " + " ".join(app.name.split()),
+        "# Deckhand launcher for " + " ".join(app.name.split()),
         f"export WINEPREFIX={q(str(compat / 'pfx'))}",
         f"LOG={q(str(paths.logs / (app.id + '-launch.log')))}",
         '{ mkdir -p "$(dirname "$LOG")" && exec >"$LOG" 2>&1; } || true  # last launch only, for troubleshooting',
-        'echo "ProtonLaunch: starting $(date)"',
+        'echo "Deckhand: starting $(date)"',
         "# Z: points at the home folder while installing; put it back if an install was interrupted.",
         '[ "$(readlink "$WINEPREFIX/dosdevices/z:")" = / ] || ln -sfn / "$WINEPREFIX/dosdevices/z:"',
         f"cd {q(workdir)} || cd {q(str(Path(app.exe).parent))} || exit 1",
@@ -1260,7 +1262,7 @@ class Installer:
         mounts = [p for p in (self.installer.parent, self.paths.root) if not p.is_relative_to(self.home)]
         self._env = runtime_env(self.runtime, compat, self.steam_root, mounts)
         self.entry = container_entry_point(Path(self.runtime.path), self._roots) if self.runtime.is_proton else None
-        self._log(f"ProtonLaunch: installing {self.installer.name} as '{name}'")
+        self._log(f"Deckhand: installing {self.installer.name} as '{name}'")
         save_install_info(compat, name, self.installer, self.runtime)
         self._log(f"Runtime: {self.runtime.name} ({self.runtime.path})")
         if self.entry:
@@ -1397,7 +1399,7 @@ def portable_folder(pending: PendingInstall) -> tuple[Path, int] | None:
     """The program's own folder with other files in it, if copying it along is worth offering.
 
     Portable programs usually need the files next to them. Never offered for shared folders
-    (Downloads, Desktop, a drive's root…) or a folder that contains ProtonLaunch's own data."""
+    (Downloads, Desktop, a drive's root…) or a folder that contains Deckhand's own data."""
     folder = pending.installer.parent
     if _shared_folder(folder) or pending.compat_dir.resolve().is_relative_to(folder.resolve()):
         return None
@@ -1491,6 +1493,8 @@ def safe_extra_dirs(app: App, home: Path | None = None) -> list[Path]:
 
 def app_paths(app: App) -> list[Path]:
     """Everything on disk that belongs to an installed program."""
+    if not app.prefix:  # a streaming service: nothing of its own on disk
+        return []
     return [p for p in [Path(app.prefix), *safe_extra_dirs(app)] if p.exists()]
 
 
@@ -1512,7 +1516,7 @@ INSTALL_INFO = "protonlaunch-install.json"
 
 
 def save_install_info(compat: Path, name: str, installer: Path, runtime: Runtime) -> None:
-    """What's needed to finish this install later, if ProtonLaunch is closed before it's done."""
+    """What's needed to finish this install later, if Deckhand is closed before it's done."""
     info = {"name": name, "installer": str(installer), "started": time.time(),
             "runtime": [runtime.name, runtime.kind, runtime.path]}
     try:
@@ -1530,7 +1534,7 @@ def load_install_info(compat: Path) -> dict:
 
 
 def prefix_in_use(compat: Path) -> bool:
-    """Is anything still running in this prefix (e.g. an installer that outlived ProtonLaunch)?"""
+    """Is anything still running in this prefix (e.g. an installer that outlived Deckhand)?"""
     keys = {f"WINEPREFIX={compat / 'pfx'}".encode(), f"STEAM_COMPAT_DATA_PATH={compat}".encode()}
     me = os.getpid()
     try:
@@ -1574,9 +1578,9 @@ def resume_install(paths: Paths, compat: Path, roots: Iterable[Path] | None = No
 
 
 def orphan_prefixes(paths: Paths) -> list[Path]:
-    """Prefixes no installed program uses: left by installs that were interrupted (ProtonLaunch
+    """Prefixes no installed program uses: left by installs that were interrupted (Deckhand
     closed or killed mid-install, the Deck turned off…)."""
-    used = {Path(a.prefix).resolve() for a in Library(paths).load()}
+    used = {Path(a.prefix).resolve() for a in Library(paths).load() if a.prefix}
     try:
         dirs = sorted(d for d in paths.prefixes.iterdir() if d.is_dir() and not d.is_symlink())
     except OSError:
@@ -1707,7 +1711,7 @@ def desktop_entry_path(app: App) -> Path:
 
 
 def write_desktop_file(path: Path, name: str, exe: str, workdir: str, icon: str,
-                       comment: str = "Windows program installed with ProtonLaunch") -> Path:
+                       comment: str = "Windows program installed with Deckhand") -> Path:
     def esc(v: str) -> str:
         return v.replace("\\", "\\\\").replace("\n", " ")
 
@@ -1848,8 +1852,10 @@ def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None, runni
     remove_desktop_entry(app)
     for d in safe_extra_dirs(app):
         shutil.rmtree(d, ignore_errors=True)
-    shutil.rmtree(app.prefix, ignore_errors=True)
-    files = [Path(app.launcher), paths.logs / f"{app.id}.log", *map(Path, app.artwork)]
+    if app.prefix:
+        shutil.rmtree(app.prefix, ignore_errors=True)
+    files = [Path(app.launcher), paths.logs / f"{app.id}.log", paths.logs / f"{app.id}-launch.log",
+             *map(Path, app.artwork)]
     if app.icon:
         files.append(Path(app.icon))
     for f in files:
@@ -1867,7 +1873,7 @@ def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None, runni
 def _duplicate_key(e: dict, launchers: Path | None) -> tuple:
     exe = _unquote(e.get("Exe", ""))
     if launchers is not None and exe and Path(exe).parent == launchers:
-        return ("launcher", exe)  # one ProtonLaunch program: one shortcut, whatever it's called
+        return ("launcher", exe)  # one Deckhand program: one shortcut, whatever it's called
     return ("same", exe, _unquote(e.get("StartDir", "")), str(e.get("LaunchOptions", "")),
             str(e.get("AppName", e.get("appname", ""))))
 

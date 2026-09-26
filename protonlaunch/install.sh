@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install ProtonLaunch from a source checkout (most people should use get.sh instead).
+# Install Deckhand from a source checkout (most people should use get.sh instead).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
