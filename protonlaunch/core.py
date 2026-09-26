@@ -1965,13 +1965,15 @@ def default_installer_dirs() -> list[Path]:
     return [home / "Downloads", home / "Desktop", *removable_media()]
 
 
-def installer_files(installer: Path) -> list[Path]:
-    """The setup file plus its data parts (GOG-style 'setup_x-1.bin', 'setup_x-2.bin', …)."""
+def installer_files(installer: Path, siblings: Iterable[Path] | None = None) -> list[Path]:
+    """The setup file plus its data parts (GOG-style 'setup_x-1.bin', 'setup_x-2.bin', …).
+    `siblings`: the folder's files, when the caller already listed them (saves a listing per file)."""
     installer = Path(installer)
     files = [installer] if installer.exists() else []
     pat = re.compile(re.escape(installer.stem) + r"(-\d+)?\.bin", re.I)
     try:
-        files += sorted(p for p in installer.parent.iterdir() if p != installer and pat.fullmatch(p.name))
+        others = installer.parent.iterdir() if siblings is None else siblings
+        files += sorted(p for p in others if p != installer and pat.fullmatch(p.name))
     except OSError:
         pass
     return files
@@ -2032,7 +2034,8 @@ def find_installers(
                     st = p.stat()
                 except OSError:
                     continue
-                found[p] = FoundInstaller(p, files_size(installer_files(p)), st.st_mtime)
+                parts = [Path(dirpath) / n for n in filenames if n.lower().endswith(".bin")]
+                found[p] = FoundInstaller(p, files_size(installer_files(p, parts)), st.st_mtime)
     return sorted(found.values(), key=lambda i: i.mtime, reverse=True)[:limit]
 
 

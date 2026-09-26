@@ -53,6 +53,7 @@ class TestWindow(Env):
         Sheet.ask = self._orig_ask
         core.steam_roots = self._orig_roots
         self.win.nav and self.win.nav.stop()
+        self.win.pending = None  # (closing would otherwise ask about an unfinished pick)
         self.win.close()
         self.win.deleteLater()
         self.pump()
@@ -364,6 +365,9 @@ class TestWindow(Env):
                              steam_roots_override=[self.steam])
         pending = job.run()
         job.close()  # ProtonLaunch was closed on the pick screen
+        self.win.go_home()
+        self.assertTrue(self.win.home.manage_btn.isVisible())
+        self.assertIn("1 unfinished", self.win.home.manage_btn.text())
         self.win.show_installed()
         page = self.win.installed
         self.assertEqual(page.list.count(), 1)

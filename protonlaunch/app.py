@@ -294,8 +294,12 @@ class HomePage(Page):
             self.note.setText("")
         self.note.setVisible(bool(self.note.text()))
         count = len(self.win.library.load())
-        self.manage_btn.setText(f"Installed programs ({count})  ·  uninstall")
-        self.manage_btn.setVisible(count > 0)
+        unfinished = len(core.orphan_prefixes(self.win.paths))
+        text = f"Installed programs ({count})  ·  uninstall"
+        if unfinished:
+            text += f"  ·  {unfinished} unfinished"
+        self.manage_btn.setText(text)
+        self.manage_btn.setVisible(count + unfinished > 0)
 
     def enter(self) -> None:
         self.refresh()
@@ -383,8 +387,9 @@ class BrowserPage(Page):
             it = QListWidgetItem(self.icon_dir, d.name)
             it.setData(Qt.ItemDataRole.UserRole, str(d))
             self.list.addItem(it)
+        bins = [e for e in entries if e.name.lower().endswith(".bin")]
         for f in files:
-            size = core.human_size(core.files_size(core.installer_files(f)))
+            size = core.human_size(core.files_size(core.installer_files(f, bins)))
             it = QListWidgetItem(self.icon_file, f"{f.name}     {size}")
             it.setData(Qt.ItemDataRole.UserRole, str(f))
             self.list.addItem(it)
@@ -447,6 +452,10 @@ class InstallPage(Page):
         self.elapsed = label("", "muted")
         self.elapsed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.elapsed)
+        keep_open = label("Keep ProtonLaunch open until this is done. If it does get closed, finish the "
+                          "install later from Installed programs.", "muted")
+        keep_open.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(keep_open)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(4000)
@@ -1294,6 +1303,7 @@ class MainWindow(QMainWindow):
             elif choice == 1:
                 self.paths.remember(kept_leftovers=sorted(kept | {d.name for d, _n in left}))
             elif choice == 2:
+                self.paths.remember(kept_leftovers=sorted(kept | {d.name for d, _n in left}))  # listed there now
                 self.show_installed()
 
         self.run_worker(lambda _s: [(d, core.dir_size(d)) for d in dirs], finished, lambda _m: None,
@@ -1602,6 +1612,11 @@ class MainWindow(QMainWindow):
                 return
             self.thread.job.cancel()
             self.thread.wait(15000)
+        elif self.pending is not None:
+            if Sheet.ask(self, "Quit?", "The program is installed but not in Steam yet. You can finish later "
+                         "from Installed programs.", ("Stay", "Quit"), primary=0) != 1:
+                event.ignore()
+                return
         # Let background jobs (adding to Steam, uninstalling, updating) finish: a QThread destroyed
         # mid-run takes the whole app down with it.
         if self.update_thread is not None:

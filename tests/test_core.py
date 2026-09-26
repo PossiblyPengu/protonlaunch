@@ -280,6 +280,8 @@ class TestFindingInstallers(unittest.TestCase):
             files = core.installer_files(exe)
             self.assertEqual(sorted(f.name for f in files),
                              ["SETUP_X.BIN", "setup_x-1.bin", "setup_x-2.bin", "setup_x.exe"])
+            listed = list(Path(d).iterdir())
+            self.assertEqual(sorted(core.installer_files(exe, listed)), sorted(files))  # same, from a listing
             self.assertEqual(core.delete_files(files), 35)
             self.assertEqual([p.name for p in Path(d).iterdir()], ["other-1.bin"])
 
