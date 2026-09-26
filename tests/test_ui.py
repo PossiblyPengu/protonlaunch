@@ -396,13 +396,13 @@ class TestWindow(Env):
         self.assertTrue(self.win.stations["stream"].isChecked())
         page = self.win.streaming
         self.wait_for(lambda: page.installed is not None)
-        self.assertIn("Google Chrome not installed yet", page.list.item(0).text())
+        self.assertIn("installs Google Chrome", page.list.item(0).text())
         self.assertIn("Google Chrome ✗", page.on_deck.text())
         self.answers = [0]  # Add to Steam
         page._activate(page.list.item(0))
         self.assertEqual(self.asked[-1], "Add Xbox Cloud Gaming to Steam?")
         self.wait_for(lambda: "In Steam" in page.list.item(0).text())
-        self.wait_for(lambda: "Google Chrome installed" in page.list.item(0).text())  # re-checked after
+        self.wait_for(lambda: "Google Chrome ✓" in page.list.item(0).text())  # re-checked after
         self.assertIn("Google Chrome ✓", page.on_deck.text())
         app = core.Library(self.paths).load()[0]
         self.assertTrue(app.artwork)

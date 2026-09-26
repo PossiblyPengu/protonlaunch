@@ -1,5 +1,5 @@
 {
-  "version": "3.0.0",
-  "sha256": "fa91627028d0956f4b1920f66b26ca3574c863a084dbd49610d977bd30736ec6",
-  "notes": "ProtonLaunch is now Deckhand, with a new look: sections down the left (Install, Stream, Add-ons, Installed; L1/R1 to switch). New Add-ons: Decky Loader and EmuDeck from their official sources. Streaming now recognises services and apps you set up yourself."
+  "version": "3.1.0",
+  "sha256": "f3abe89b5183b7ac767d0aaa8d787e6683fdd4748352001e7b1f1dfa6cdaeb06",
+  "notes": "Redesign finished: no top bar (free space and Menu moved into the side rail), badges for every service, add-on and program without an icon, installers show their own icons, pages line up, long rows wrap instead of scrolling sideways."
 }

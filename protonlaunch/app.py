@@ -39,6 +39,7 @@ from .nav import Nav
 from .widgets import ElideLabel, HintBar, Sheet, Steps, Tile, Toast, breakable, button, draw_glyph, label
 
 COLUMNS = 4  # tiles per row next to the rail
+PAGE_MARGINS = (40, 30, 40, 22)  # every page lines up with the rail's wordmark
 MAX_FOUND = 2 * COLUMNS - 1  # two rows of tiles, the first being "Browse files"
 
 
@@ -253,7 +254,7 @@ class HomePage(Page):
         content = QWidget()
         scroll.setWidget(content)
         lay = QVBoxLayout(content)
-        lay.setContentsMargins(40, 26, 40, 26)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         lay.addWidget(label("Install a Windows program", "h1"))
         lay.addWidget(label("Pick a setup file. Deckhand installs it and adds the program to your "
@@ -289,6 +290,7 @@ class HomePage(Page):
         lay.addLayout(manage)
         lay.addStretch(1)
         self.tiles: list[Tile] = []
+        self.icons: dict[tuple[str, float], QImage | None] = {}
 
     def refresh(self) -> None:
         while self.grid.count():
@@ -305,7 +307,9 @@ class HomePage(Page):
         self.tiles = [browse]
         for f in shown:
             when = "Installed" if str(f.path) in installed else ago(f.mtime)
-            t = Tile(core.guess_name(f.path), f"{core.human_size(f.size)} · {when}", glyph="download")
+            icon = self._icon(f)
+            t = Tile(core.guess_name(f.path), f"{core.human_size(f.size)} · {when}", icon=icon,
+                     glyph="" if icon is not None else "download")
             t.setToolTip(str(f.path))
             t.clicked.connect(lambda _c=False, f=f: self.win.confirm_install(f.path))
             self.tiles.append(t)
@@ -331,6 +335,16 @@ class HomePage(Page):
             text += f"  ·  {unfinished} unfinished"
         self.manage_btn.setText(text)
         self.manage_btn.setVisible(count + unfinished > 0)
+
+    def _icon(self, f: core.FoundInstaller) -> QImage | None:
+        """The installer's own icon (cached: installers can be big)."""
+        key = (str(f.path), f.mtime)
+        if key not in self.icons:
+            try:
+                self.icons[key] = artwork.load_exe_icon(f.path)
+            except Exception:  # noqa: BLE001 — a damaged file just gets the plain tile
+                self.icons[key] = None
+        return self.icons[key]
 
     def enter(self) -> None:
         self.refresh()
@@ -365,7 +379,7 @@ class BrowserPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         self.heading = label("Choose an installer", "h1")
         lay.addWidget(self.heading)
@@ -463,7 +477,7 @@ class InstallPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 26, 48, 22)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(14)
         self.heading = label("", "h1")
         lay.addWidget(self.heading)
@@ -557,7 +571,7 @@ class PickPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 26, 48, 22)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(14)
         self.heading = label("Which one is the program?", "h1")
         lay.addWidget(self.heading)
@@ -595,8 +609,8 @@ class PickPage(Page):
                 where = str(c.exe.parent)
             icon = artwork.load_exe_icon(c.exe)
             it = QListWidgetItem(f"{c.exe.name}\n{where}")
-            if icon is not None:
-                it.setIcon(QIcon(QPixmap.fromImage(icon)))
+            it.setIcon(QIcon(QPixmap.fromImage(icon)) if icon is not None
+                       else badge_icon(c.exe.stem, artwork.accent_color(c.exe.stem).name()))
             it.setData(Qt.ItemDataRole.UserRole, str(c.exe))
             self.list.addItem(it)
         has = bool(cands)
@@ -634,7 +648,7 @@ class DonePage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 30, 48, 26)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(14)
         lay.addStretch(1)
         self.art = QLabel()
@@ -739,13 +753,13 @@ class InstalledPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         lay.addWidget(label("Installed programs", "h1"))
         lay.addWidget(label("Pick a program to uninstall it, or to add it back to Steam. You play them from "
                             "your Steam library.", "dim"))
         self.list = QListWidget()
-        self.list.setIconSize(self.list.iconSize() * 2.5)
+        self.list.setIconSize(QSize(44, 44))
         on_choose(self.list, self._activate)
         lay.addWidget(self.list, 1)
         self.empty = label("Nothing installed with Deckhand yet.", "muted")
@@ -767,7 +781,8 @@ class InstalledPage(Page):
         for app in apps:
             it = QListWidgetItem(self._text(app))
             icon = artwork.load_icon(app.icon)
-            it.setIcon(QIcon(QPixmap.fromImage(icon)) if icon is not None else glyph_icon("disc"))
+            it.setIcon(QIcon(QPixmap.fromImage(icon)) if icon is not None
+                       else badge_icon(app.name, artwork.accent_color(app.name).name()))
             it.setData(Qt.ItemDataRole.UserRole, app.id)
             self.list.addItem(it)
         busy = self.win.pending.compat_dir if self.win.pending else None
@@ -864,16 +879,15 @@ class StreamingPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         lay.addWidget(label("Game streaming", "h1"))
-        lay.addWidget(label("Pick a service to add it to your Steam library. Deckhand installs what it needs "
-                            "(a browser, or the streaming app) and sets up the controller. Sign in the first time "
-                            "you open it from Steam; leave with the STEAM button → Exit game.", "dim"))
+        lay.addWidget(label("Pick a service to add it to Steam. Deckhand installs what it needs and sets up the "
+                            "controller. Sign in the first time you open it; leave with STEAM → Exit game.", "dim"))
         self.on_deck = label("Checking what's installed…", "muted")
         lay.addWidget(self.on_deck)
         self.list = QListWidget()
-        self.list.setIconSize(self.list.iconSize() * 2.5)
+        self.list.setIconSize(QSize(44, 44))
         on_choose(self.list, self._activate)
         lay.addWidget(self.list, 1)
         self.status = label("", "muted")
@@ -924,11 +938,12 @@ class StreamingPage(Page):
         bx = bool(app and streaming.BETTER_XCLOUD in app.options)
         if self.installed is not None:
             uses = streaming.uses(svc, self.installed, bx)
-            have = "installed" if uses in self.installed else "not installed yet"
             if uses.startswith("local:") or uses == svc.native:
                 parts.append(f"uses {streaming.app_name(uses)}")
+            elif uses in self.installed:
+                parts.append(f"{streaming.app_name(uses)} ✓" if svc.is_web else "app installed ✓")
             else:
-                parts.append(f"{streaming.app_name(uses)} {have}" if svc.is_web else f"app {have}")
+                parts.append(f"installs {streaming.app_name(uses)}" if svc.is_web else "installs the app")
         if bx:
             parts.append("Better xCloud on")
         return f"{svc.name}\n" + "  ·  ".join(parts)
@@ -1007,7 +1022,7 @@ class AddonsPage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(40, 22, 40, 20)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         lay.addWidget(label("Add-ons", "h1"))
         lay.addWidget(label("Popular Deck add-ons, downloaded from their official sources and set up with their own "
@@ -1142,7 +1157,7 @@ class UpdatePage(Page):
     def __init__(self, win):
         super().__init__(win)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(48, 30, 48, 26)
+        lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(14)
         self.heading = label("", "h1")
         lay.addWidget(self.heading)
@@ -1245,7 +1260,6 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(main)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        v.addWidget(self._top_bar())
         self.stack = QStackedWidget()
         v.addWidget(self.stack, 1)
         self.hint_bar = HintBar()
@@ -1265,6 +1279,9 @@ class MainWindow(QMainWindow):
                   self.streaming, self.addons):
             self.stack.addWidget(p)
 
+        for lst in self.findChildren(QListWidget):
+            lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            lst.setWordWrap(True)
         self.nav = Nav(QApplication.instance(), self.on_action, busy=lambda: self.thread is not None) \
             if use_nav else None
         # A bound method (not a lambda): Qt disconnects it automatically when the window goes away.
@@ -1284,26 +1301,6 @@ class MainWindow(QMainWindow):
             self.check_for_updates(manual=False)
 
     # chrome
-    def _top_bar(self) -> QWidget:
-        bar = QFrame()
-        bar.setObjectName("topbar")
-        bar.setFixedHeight(64)
-        bar.setStyleSheet(f"QFrame#topbar {{ background: {theme.BG_RAISED}; border-bottom: 1px solid {theme.LINE}; }}")
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(28, 0, 20, 0)
-        h.setSpacing(14)
-        self.crumb = label("", "h2", wrap=False)
-        self.crumb.hide()  # pages carry their own heading; the rail shows where you are
-        h.addWidget(self.crumb)
-        h.addStretch(1)
-        self.space = label("", "chip", wrap=False)
-        h.addWidget(self.space, 0, Qt.AlignmentFlag.AlignVCenter)
-        menu = button("☰", "flat", self.open_menu)
-        menu.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        menu.setToolTip("Menu")
-        h.addWidget(menu)
-        return bar
-
     SECTIONS = ("install", "stream", "addons", "installed")
 
     def _rail(self) -> QWidget:
@@ -1331,12 +1328,22 @@ class MainWindow(QMainWindow):
             v.addWidget(b)
             self.stations[key] = b
         v.addStretch(1)
-        shoulder = label("L1 / R1  switch", "muted", wrap=False)
-        shoulder.setContentsMargins(24, 0, 0, 6)
-        v.addWidget(shoulder)
-        ver = label(f"v{__version__}", "muted", wrap=False)
-        ver.setContentsMargins(24, 0, 0, 0)
-        v.addWidget(ver)
+        menu = QPushButton("Menu")
+        menu.setObjectName("station")
+        menu.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        menu.setIcon(glyph_icon("menu"))
+        menu.setIconSize(QSize(26, 26))
+        menu.clicked.connect(lambda _c=False: self.open_menu())
+        v.addWidget(menu)
+        v.addSpacing(12)
+        self.space = label("", "muted", wrap=False)
+        self.space.setContentsMargins(24, 0, 0, 2)
+        v.addWidget(self.space)
+        for text in ("L1 / R1 to switch", f"Deckhand {__version__}"):
+            foot = label(text, "muted", wrap=False)
+            foot.setContentsMargins(24, 0, 0, 0)
+            v.addWidget(foot)
+        self.crumb = QLabel()  # (the page's own heading says where you are)
         return rail
 
     def section_of(self, page: QWidget) -> str | None:
@@ -1837,7 +1844,6 @@ class MainWindow(QMainWindow):
                       f"Installed programs: {self.paths.prefixes}\nInstall logs: {self.paths.logs}", ("Close",))
 
         items = [
-            ("Installed programs (uninstall)", self.show_installed),
             ("Check for updates", lambda: self.check_for_updates(manual=True)),
             ("Add Deckhand to Steam", self.add_self_to_steam),
             ("Remove duplicate Steam shortcuts", self.remove_duplicates),

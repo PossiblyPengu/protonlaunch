@@ -81,6 +81,9 @@ def draw_glyph(p: QPainter, r: QRectF, kind: str, color: QColor) -> None:
         for i in range(3):
             t = y + h * (0.12 + i * 0.26)
             p.drawRoundedRect(QRectF(x + w * (0.1 + (2 - i) * 0.04), t, w * (0.8 - (2 - i) * 0.08), h * 0.2), 3, 3)
+    elif kind == "menu":
+        for k in (0.28, 0.5, 0.72):
+            p.drawLine(int(x + w * 0.18), int(y + h * k), int(x + w * 0.82), int(y + h * k))
     elif kind == "plus":  # add-ons: a rounded square with a plus
         p.drawRoundedRect(r.adjusted(w * 0.08, h * 0.08, -w * 0.08, -h * 0.08), w * 0.18, h * 0.18)
         p.drawLine(int(x + w / 2), int(y + h * 0.3), int(x + w / 2), int(y + h * 0.7))

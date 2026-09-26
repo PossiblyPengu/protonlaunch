@@ -8,7 +8,7 @@ Deckhand is an installer, not a launcher: once something is installed you play i
 2. Click through the installer as usual.
 3. Done: the program is in your Steam library, with its icon and library artwork.
 
-Built for the Deck: full controller support (D-pad/stick to move, **A** select, **B** back, **X** browse, **☰** menu), big touch targets, button hints along the bottom, and full screen in Game Mode.
+Built for the Deck: four sections down the left (**Install · Stream · Add-ons · Installed**, switch with **L1/R1** or tap), full controller support (D-pad/stick to move, **A** select, **B** back, **X** browse, **☰** menu), big touch targets, button hints along the bottom, and full screen in Game Mode.
 
 ## What it does for you
 
