@@ -139,17 +139,17 @@ class Worker(QThread):
 
 
 class SizesThread(QThread):
-    size = pyqtSignal(str, object)  # app id, bytes (object: sizes can exceed 32-bit int)
+    size = pyqtSignal(str, object)  # key, bytes (object: sizes can exceed 32-bit int)
 
-    def __init__(self, apps: list[core.App]):
+    def __init__(self, items: list[tuple[str, list[Path]]]):
         super().__init__()
-        self.apps = apps
+        self.items = items
 
     def run(self) -> None:
-        for app in self.apps:
+        for key, folders in self.items:
             if self.isInterruptionRequested():
                 return
-            self.size.emit(app.id, core.app_size(app))
+            self.size.emit(key, sum(core.dir_size(f) for f in folders))
 
 
 class UpdateCheckThread(QThread):
@@ -712,6 +712,7 @@ class InstalledPage(Page):
         self.apps: dict[str, core.App] = {}
         self.sizes: dict[str, int] = {}
         self.steam: dict[str, str] = {}  # app id → core.steam_state
+        self.leftovers: dict[str, Path] = {}  # "leftover:<folder>" → prefix of an unfinished install
         self.thread: SizesThread | None = None
 
     def refresh(self) -> None:
@@ -727,13 +728,22 @@ class InstalledPage(Page):
             it.setIcon(QIcon(QPixmap.fromImage(icon)) if icon is not None else glyph_icon("disc"))
             it.setData(Qt.ItemDataRole.UserRole, app.id)
             self.list.addItem(it)
-        self.list.setVisible(bool(apps))
-        self.empty.setVisible(not apps)
-        if apps:
+        busy = self.win.pending.compat_dir if self.win.pending else None
+        self.leftovers = {f"leftover:{d.name}": d for d in core.orphan_prefixes(self.win.paths) if d != busy}
+        for key, d in self.leftovers.items():
+            it = QListWidgetItem(self._leftover_text(key))
+            it.setIcon(glyph_icon("disc"))
+            it.setData(Qt.ItemDataRole.UserRole, key)
+            self.list.addItem(it)
+        shown = bool(apps or self.leftovers)
+        self.list.setVisible(shown)
+        self.empty.setVisible(not shown)
+        if shown:
             self.list.setCurrentRow(0)
         if self.thread is not None:
             self.thread.requestInterruption()  # it clears self.thread when it's done; never touch a dead one
-        t = SizesThread([a for a in apps if a.id not in self.sizes])
+        t = SizesThread([(a.id, core.app_paths(a)) for a in apps if a.id not in self.sizes]
+                        + [(k, [d]) for k, d in self.leftovers.items() if k not in self.sizes])
         t.size.connect(self._on_size)
         t.finished.connect(lambda t=t: self._size_thread_done(t))
         self.thread = t
@@ -749,15 +759,29 @@ class InstalledPage(Page):
         where = STEAM_STATE[self.steam.get(app.id, "out")]
         return f"{app.name}\nInstalled {ago(app.installed_at)}  ·  {size}  ·  {where}"
 
-    def _on_size(self, app_id: str, size: int) -> None:
-        self.sizes[app_id] = size
+    def _leftover_text(self, key: str) -> str:
+        d = self.leftovers[key]
+        name = core.load_install_info(d).get("name") or d.name
+        size = core.human_size(self.sizes[key]) if key in self.sizes else "…"
+        return f"{name}\nUnfinished install  ·  {size}  ·  Not in Steam"
+
+    def _on_size(self, key: str, size: int) -> None:
+        self.sizes[key] = size
         for i in range(self.list.count()):
             it = self.list.item(i)
-            if it.data(Qt.ItemDataRole.UserRole) == app_id and app_id in self.apps:
-                it.setText(self._text(self.apps[app_id]))
+            if it.data(Qt.ItemDataRole.UserRole) != key:
+                continue
+            if key in self.apps:
+                it.setText(self._text(self.apps[key]))
+            elif key in self.leftovers:
+                it.setText(self._leftover_text(key))
 
     def _activate(self, item: QListWidgetItem) -> None:
-        app = self.apps.get(item.data(Qt.ItemDataRole.UserRole))
+        key = item.data(Qt.ItemDataRole.UserRole)
+        if key in self.leftovers:
+            self.win.leftover_chosen(self.leftovers[key], self.sizes.get(key))
+            return
+        app = self.apps.get(key)
         if app is None or self.win.busy_with("uninstall"):
             return
         state = self.steam.get(app.id, "out")
@@ -1239,7 +1263,7 @@ class MainWindow(QMainWindow):
     def check_leftovers(self) -> None:
         """Offer to delete prefixes left by interrupted installs (sized in the background)."""
         kept = set(self.paths.state().get("kept_leftovers", []))
-        dirs = [d for d in core.orphan_prefixes(self.paths) if d.name not in kept]
+        dirs = [d for d in core.orphan_prefixes(self.paths) if d.name not in kept and not core.prefix_in_use(d)]
         if not dirs or self.busy_with_quietly("leftovers"):
             return
 
@@ -1257,10 +1281,11 @@ class MainWindow(QMainWindow):
             if len(left) > 8:
                 names += f"\n…and {len(left) - 8} more"
             choice = Sheet.ask(self, "Unfinished installs",
-                               f"These Windows folders are left over from installs that didn't finish (for "
-                               f"example, ProtonLaunch was closed during the install). Nothing in Steam uses "
-                               f"them.\n\n{names}\n\nDelete them to free {core.human_size(total)}?",
-                               ("Delete", "Keep"), primary=0, danger=(0,))
+                               f"These are left over from installs that didn't finish (for example, ProtonLaunch "
+                               f"was closed during the install). Nothing in Steam uses them.\n\n{names}\n\n"
+                               f"Delete them to free {core.human_size(total)}, or look at them one by one — an "
+                               "install that got far enough can still be finished.",
+                               ("Delete all", "Keep", "Look at them"), primary=2, danger=(0,))
             if choice == 0:
                 for d, _n in left:
                     shutil.rmtree(d, ignore_errors=True)
@@ -1268,9 +1293,44 @@ class MainWindow(QMainWindow):
                 self.refresh_space()
             elif choice == 1:
                 self.paths.remember(kept_leftovers=sorted(kept | {d.name for d, _n in left}))
+            elif choice == 2:
+                self.show_installed()
 
         self.run_worker(lambda _s: [(d, core.dir_size(d)) for d in dirs], finished, lambda _m: None,
                         kind="leftovers")
+
+    def leftover_chosen(self, compat: Path, size: int | None) -> None:
+        """An unfinished install: finish it (find what it installed) or delete it."""
+        if self.thread is not None or self.busy:
+            self.flash("Finish what's running first")
+            return
+        name = core.load_install_info(compat).get("name") or compat.name
+        if core.prefix_in_use(compat):
+            Sheet.ask(self, name, "Its installer is still running (ProtonLaunch was closed while it ran). Let it "
+                      "finish, then come back here to add the program to Steam.", ("Close",))
+            return
+        freed = f" and free {core.human_size(size)}" if size else ""
+        choice = Sheet.ask(self, name, "This install didn't finish: ProtonLaunch was closed before the program "
+                           f"was added to Steam. Finish setting it up, or delete it{freed}.",
+                           ("Finish setup", "Delete", "Cancel"), primary=0, danger=(1,))
+        if choice == 1:
+            shutil.rmtree(compat, ignore_errors=True)
+            self.flash(f"Deleted — freed {core.human_size(size)}" if size else "Deleted")
+            self.refresh_space()
+            self.installed.enter()
+        elif choice == 0:
+            pending = core.resume_install(self.paths, compat)
+            if pending is None:
+                if Sheet.ask(self, name, "No program was installed in it. Delete it?", ("Delete", "Keep"),
+                             danger=(0,)) == 0:
+                    shutil.rmtree(compat, ignore_errors=True)
+                    self.refresh_space()
+                    self.installed.enter()
+                return
+            self.job = core.Installer(pending.installer, self.paths, runtime=pending.runtime)
+            self.pending = pending
+            self.progress.reset(pending.installer)
+            self.on_installed(pending)
 
     def busy_with_quietly(self, kind: str) -> bool:
         return any(getattr(w, "kind", "") == kind for w in self.workers)
@@ -1379,7 +1439,7 @@ class MainWindow(QMainWindow):
             self.flash(msg)
             self.refresh_space()
             if self.stack.currentWidget() is self.installed:
-                if self.library.load():
+                if self.library.load() or core.orphan_prefixes(self.paths):
                     self.installed.enter()
                 else:
                     self.go_home()

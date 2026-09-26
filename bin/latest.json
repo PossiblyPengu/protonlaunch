@@ -1,5 +1,5 @@
 {
-  "version": "2.8.0",
-  "sha256": "7729b19beb23ef92928f485d8945e61f42ccaacbd8ffaf8c87953e93d393715f",
-  "notes": "Leftover Windows folders from installs that didn't finish are now found and offered for deletion. When an installer runs DirectX setup, its error log is copied into the install log. Includes 2.7.x's fixes for duplicated Steam shortcuts."
+  "version": "2.9.0",
+  "sha256": "1d7534ec00d719522106b5167f30004028a7379838590e5bada63e3a62957f94",
+  "notes": "Interrupted installs can now be finished: they show under Installed programs as unfinished, with Finish setup (no reinstall) or Delete. Leftovers whose installer is still running are never touched. DirectX setup's error log is now looked for after the installer's last window closes, and in more places."
 }

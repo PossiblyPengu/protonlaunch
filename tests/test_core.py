@@ -665,6 +665,41 @@ class TestInstallFlow(Env):
         self.assertEqual(core.orphan_prefixes(self.paths), [left])
         self.assertTrue(Path(app.prefix).exists())
 
+    def test_an_interrupted_install_can_be_finished_later(self):
+        job = self.job()
+        pending = job.run()
+        job.close()  # ProtonLaunch closed before the program was picked
+        z = pending.pfx / "dosdevices/z:"
+        z.unlink()
+        z.symlink_to(self.home)  # as if the install was cut off while Z: pointed at home
+        self.assertEqual(core.orphan_prefixes(self.paths), [pending.compat_dir])
+        self.assertFalse(core.prefix_in_use(pending.compat_dir))
+        again = core.resume_install(self.paths, pending.compat_dir, [self.steam])
+        self.assertEqual((again.id, again.name, again.installer), (pending.id, pending.name, pending.installer))
+        self.assertEqual(again.runtime, pending.runtime)
+        self.assertEqual(again.candidates[0].exe, pending.candidates[0].exe)
+        self.assertEqual(os.readlink(z), "/")
+        app = core.Installer(again.installer, self.paths, runtime=again.runtime,
+                             steam_roots_override=[self.steam]).finish(again, again.candidates[0].exe)
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        self.assertEqual(core.orphan_prefixes(self.paths), [])
+
+    def test_resume_finds_nothing_in_an_empty_prefix(self):
+        (self.paths.prefixes / "x/pfx/drive_c").mkdir(parents=True)
+        self.assertIsNone(core.resume_install(self.paths, self.paths.prefixes / "x", [self.steam]))
+
+    def test_prefix_in_use_sees_a_process_running_in_it(self):
+        import subprocess
+        compat = self.paths.prefixes / "busy"
+        env = dict(os.environ, WINEPREFIX=str(compat / "pfx"))
+        proc = subprocess.Popen(["sleep", "30"], env=env)
+        try:
+            self.assertTrue(core.prefix_in_use(compat))
+            self.assertFalse(core.prefix_in_use(self.paths.prefixes / "other"))
+        finally:
+            proc.kill()
+            proc.wait()
+
     def test_directx_log_is_read_even_in_utf16(self):
         windows = self.tmp / "pfx/drive_c/windows"
         windows.mkdir(parents=True)

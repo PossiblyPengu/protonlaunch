@@ -359,6 +359,25 @@ class TestWindow(Env):
         self.wait_for(lambda: not gone.exists())
         self.assertTrue(keep.exists())
 
+    def test_unfinished_install_is_finished_from_installed_programs(self):
+        job = core.Installer(self.add_installer("Cool Game Setup.exe", 10), self.paths,
+                             steam_roots_override=[self.steam])
+        pending = job.run()
+        job.close()  # ProtonLaunch was closed on the pick screen
+        self.win.show_installed()
+        page = self.win.installed
+        self.assertEqual(page.list.count(), 1)
+        self.assertIn("Unfinished install", page.list.item(0).text())
+        self.answers = [0]  # Finish setup
+        page._activate(page.list.item(0))
+        self.wait_for(lambda: self.win.stack.currentWidget() in (self.win.done, self.win.pick))
+        if self.win.stack.currentWidget() is self.win.pick:
+            self.win.pick.use()
+            self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+        app = core.Library(self.paths).load()[0]
+        self.assertEqual(app.prefix, str(pending.compat_dir))
+        self.assertTrue(core.in_steam(app, [self.steam]))
+
     def test_remove_duplicate_shortcuts_only_with_steam_closed(self):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
         e = {"appid": 1, "AppName": "Emu", "Exe": '"/emu"', "StartDir": '"/"', "LaunchOptions": ""}

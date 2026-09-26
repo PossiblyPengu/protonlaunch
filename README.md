@@ -21,7 +21,7 @@ Built for the Deck: full controller support (D-pad/stick to move, **A** select, 
 - **Adds it to the Desktop Mode app menu** (under Games), removed again on uninstall.
 - **Frees space afterwards:** one tap deletes the installer, including GOG-style `.bin` parts.
 - **Handles programs that need no install:** if the file *is* the program, it's added as-is — with its folder, if you want (portable programs usually need the files next to them).
-- **Cleans up after interrupted installs:** if an install never finished (ProtonLaunch was closed mid-install, the Deck turned off…), its leftover Windows folder is offered for deletion the next time ProtonLaunch opens.
+- **Picks up interrupted installs:** if an install never finished (ProtonLaunch was closed mid-install, the Deck turned off…), it shows up under Installed programs as an unfinished install: **Finish setup** adds what it installed to Steam without reinstalling, or delete it to free the space. ProtonLaunch also offers this when it opens, and never touches a folder whose installer is still running.
 - **Records DirectX setup errors:** if the installer runs Microsoft's DirectX setup, its own error log is copied into ProtonLaunch's install log. (That setup often reports errors under Proton; Proton already includes DirectX, so programs usually run anyway.)
 - **Keeps the Deck awake while installing** (when the system allows it), so a long install isn't paused by sleep.
 

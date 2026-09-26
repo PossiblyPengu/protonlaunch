@@ -1261,6 +1261,7 @@ class Installer:
         self._env = runtime_env(self.runtime, compat, self.steam_root, mounts)
         self.entry = container_entry_point(Path(self.runtime.path), self._roots) if self.runtime.is_proton else None
         self._log(f"ProtonLaunch: installing {self.installer.name} as '{name}'")
+        save_install_info(compat, name, self.installer, self.runtime)
         self._log(f"Runtime: {self.runtime.name} ({self.runtime.path})")
         if self.entry:
             self._log(f"Container: {self.entry.parent.name} (same as Steam)")
@@ -1301,7 +1302,6 @@ class Installer:
                       f"Install to C: or D: (both have {human_size(free_space(home))} free).")
             rc = self._stream(sleep_inhibitor() + run_command(self.runtime, target, entry=self.entry))
             self._log(f"Installer exited with code {rc}")
-            self._log_directx(pfx)
             if self._cancelled:
                 raise Cancelled()
 
@@ -1310,6 +1310,7 @@ class Installer:
                 self._wait_for_wine(ws, inhibit=True)
             if self._cancelled:
                 raise Cancelled()
+            self._log_directx(pfx)  # (DirectX setup often runs after the installer's first window closes)
             restore_system_drive(pfx, hidden_z)
             hidden_z = None
 
@@ -1346,6 +1347,12 @@ class Installer:
 
     def finish(self, pending: PendingInstall, exe: Path, name: str | None = None, icon: str = "") -> App:
         """Save the app, write its launcher and add it to Steam (with `icon`, a PNG path)."""
+        if self._log_fh is None:  # finishing an install from an earlier session: keep adding to its log
+            try:
+                pending.log_file.parent.mkdir(parents=True, exist_ok=True)
+                self._log_fh = open(pending.log_file, "a", encoding="utf-8")
+            except OSError:
+                pass
         self._set("steam", "Adding to Steam…")
         app = App(
             id=pending.id,
@@ -1501,6 +1508,71 @@ def dir_size(path: Path, limit: int = 500_000) -> int:
     return total
 
 
+INSTALL_INFO = "protonlaunch-install.json"
+
+
+def save_install_info(compat: Path, name: str, installer: Path, runtime: Runtime) -> None:
+    """What's needed to finish this install later, if ProtonLaunch is closed before it's done."""
+    info = {"name": name, "installer": str(installer), "started": time.time(),
+            "runtime": [runtime.name, runtime.kind, runtime.path]}
+    try:
+        (compat / INSTALL_INFO).write_text(json.dumps(info), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_install_info(compat: Path) -> dict:
+    try:
+        info = json.loads((compat / INSTALL_INFO).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def prefix_in_use(compat: Path) -> bool:
+    """Is anything still running in this prefix (e.g. an installer that outlived ProtonLaunch)?"""
+    keys = {f"WINEPREFIX={compat / 'pfx'}".encode(), f"STEAM_COMPAT_DATA_PATH={compat}".encode()}
+    me = os.getpid()
+    try:
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return False
+    for pid in pids:
+        if pid == me:
+            continue
+        try:
+            env = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            continue
+        if any(kv in keys for kv in env.split(b"\0")):
+            return True
+    return False
+
+
+def resume_install(paths: Paths, compat: Path, roots: Iterable[Path] | None = None) -> PendingInstall | None:
+    """Pick up an install that was interrupted after its installer ran: find what it installed.
+    None if there's nothing in it to add."""
+    pfx = compat / "pfx"
+    if not (pfx / "drive_c").is_dir():
+        return None
+    info = load_install_info(compat)
+    name = str(info.get("name") or compat.name.replace("-", " ").title())
+    installer = Path(str(info.get("installer") or compat.name))
+    rt = info.get("runtime")
+    runtime = Runtime(*rt) if isinstance(rt, list) and len(rt) == 3 and Path(rt[2]).exists() else None
+    if runtime is None:
+        runtimes = find_runtimes(roots)
+        if not runtimes:
+            return None
+        runtime = runtimes[0]
+    if (pfx / "dosdevices" / "z:").is_symlink():
+        restore_system_drive(pfx, "/")  # it was pointed at the home folder while installing
+    cands = find_program(pfx, name, installer if installer.is_file() else None, [])
+    if not cands:
+        return None
+    return PendingInstall(compat.name, name, installer, compat, runtime, cands, paths.logs / f"{compat.name}.log")
+
+
 def orphan_prefixes(paths: Paths) -> list[Path]:
     """Prefixes no installed program uses: left by installs that were interrupted (ProtonLaunch
     closed or killed mid-install, the Deck turned off…)."""
@@ -1515,12 +1587,21 @@ def orphan_prefixes(paths: Paths) -> list[Path]:
 def directx_log(pfx: Path, lines: int = 25) -> str:
     """The end of the DirectX setup's own logs (DXError.log, DirectX.log in C:\\Windows), if any."""
     out = []
+    names = ("dxerror.log", "directx.log")
+    logs: list[Path] = []
     windows = pfx / "drive_c" / "windows"
-    try:
-        logs = sorted(f for f in windows.iterdir() if f.name.lower() in ("dxerror.log", "directx.log"))
-    except OSError:
-        return ""
-    for f in logs:
+    for d in (windows, windows / "Logs", windows / "logs", windows / "temp"):
+        try:
+            logs += [f for f in d.iterdir() if f.name.lower() in names and f not in logs]
+        except OSError:
+            pass
+    users = pfx / "drive_c" / "users"
+    for dirpath, dirnames, files in os.walk(users) if users.is_dir() else ():
+        if dirpath.count(os.sep) - str(users).count(os.sep) >= 5:
+            dirnames.clear()  # temp folders are shallow; don't crawl the whole profile
+        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+        logs += [Path(dirpath) / f for f in files if f.lower() in names]
+    for f in sorted(set(logs)):
         try:
             text = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
