@@ -391,7 +391,8 @@ class TestWindow(Env):
         os.environ.update(PATH=f"{bindir}:{os.environ['PATH']}", FAKE_FLATPAK_LOG=str(self.tmp / "fp.log"),
                           FAKE_FLATPAK_DB=str(self.tmp / "fp.db"))
         self.win.go_home()
-        self.win.on_action("rb")  # R1: next section
+        for _ in range(2):
+            self.win.on_action("rb")  # R1 twice: Install → Stores → Stream
         self.assertIs(self.win.stack.currentWidget(), self.win.streaming)
         self.assertTrue(self.win.stations["stream"].isChecked())
         page = self.win.streaming
@@ -471,8 +472,8 @@ class TestWindow(Env):
         from deckhand import addons
         from tests.test_addons import FakeResponse
         self.win.go_home()
-        for _ in range(2):
-            self.win.on_action("rb")  # R1 twice: Install → Stream → Add-ons
+        for _ in range(3):
+            self.win.on_action("rb")  # R1 three times: Install → Stores → Stream → Add-ons
         page = self.win.addons
         self.assertIs(self.win.stack.currentWidget(), page)
         self.assertTrue(self.win.stations["addons"].isChecked())
@@ -494,6 +495,113 @@ class TestWindow(Env):
             self.wait_for(lambda: "Downloaded" in page.list.item(1).text())
         finally:
             addons.emudeck_release, addons.updater._open = orig_release, orig_open
+
+    def test_stores_page_installs_a_windows_store_under_its_own_name(self):
+        from deckhand import stores
+        from tests.test_addons import FakeResponse
+        self.win.go_home()
+        self.win.on_action("rb")  # R1: Install → Stores
+        page = self.win.stores
+        self.assertIs(self.win.stack.currentWidget(), page)
+        self.assertTrue(self.win.stations["stores"].isChecked())
+        rows = [page.list.item(i).text().split("\n")[0] for i in range(page.list.count())]
+        self.assertEqual(rows, [s.name for s in stores.STORES])
+        row = rows.index("Battle.net")
+        self.assertIn("Not installed", page.list.item(row).text())
+        self.shot("stores")
+        orig = stores.updater._open
+        stores.updater._open = lambda url, timeout, headers=None: FakeResponse(b"MZ" + b"\0" * 100)
+        try:
+            self.answers = [0]  # Download and install
+            page._activate(page.list.item(row))
+            self.assertEqual(self.asked[-1], "Install Battle.net?")
+            self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+        finally:
+            stores.updater._open = orig
+        self.assertEqual(self.win.progress.heading.text(), "Installing Battle.net")
+        self.assertIn("Battle.net is in your Steam library", self.win.done.heading.text())
+        app = core.Library(self.paths).load()[0]
+        installer = stores.download_path(stores.store("battlenet"), self.paths)
+        self.assertEqual((app.kind, app.name, app.installer), ("program", "Battle.net", str(installer)))
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        self.assertFalse(installer.exists())  # Deckhand's own download: deleted once installed
+        self.assertFalse(self.win.done.delete_btn.isVisible())
+        self.win.show_stores()
+        self.assertIn("Installed  ·  In Steam", page.list.item(row).text())
+        self.answers = [1]  # Close (the other choice: Uninstall)
+        page._activate(page.list.item(row))
+        self.assertEqual(self.asked[-1], "Battle.net")
+        self.assertEqual(len(core.Library(self.paths).load()), 1)
+
+    def test_a_cancelled_store_install_leaves_no_download(self):
+        from deckhand import stores
+        from tests.test_addons import FakeResponse
+        os.environ["FAKE_SLEEP"] = "3"
+        orig = stores.updater._open
+        stores.updater._open = lambda url, timeout, headers=None: FakeResponse(b"MZ" + b"\0" * 100)
+        try:
+            self.win.show_stores()
+            self.answers = [0]  # Download and install
+            self.win.stores._activate(self.win.stores.list.item(2))  # EA app
+            self.wait_for(lambda: "installer" in self.win.progress.status.text())
+        finally:
+            stores.updater._open = orig
+        self.assertEqual(self.win.progress.heading.text(), "Installing EA app")
+        installer = stores.download_path(stores.store("ea"), self.paths)
+        self.assertTrue(installer.exists())
+        self.answers = [1]  # Cancel install
+        self.win.cancel_install()
+        self.wait_for(lambda: self.win.thread is None)
+        self.assertFalse(installer.exists())
+        self.assertEqual(core.Library(self.paths).load(), [])
+
+    def test_a_failed_store_download_is_explained(self):
+        from deckhand import stores
+
+        def unreachable(url, timeout, headers=None):
+            raise stores.updater.UpdateError("HTTP 503 for " + url)
+
+        orig = stores.updater._open
+        stores.updater._open = unreachable
+        try:
+            self.win.show_stores()
+            page = self.win.stores
+            self.answers = [0, 0]  # Download and install; Close
+            page._activate(page.list.item(1))
+            self.wait_for(lambda: self.asked[-1] == "Couldn't set up Battle.net")
+        finally:
+            stores.updater._open = orig
+        self.assertIs(self.win.stack.currentWidget(), page)
+        self.assertEqual(core.Library(self.paths).load(), [])
+
+    def test_stores_page_adds_heroic_and_removes_it_again(self):
+        from tests.test_streaming import FAKE_FLATPAK
+        bindir = self.tmp / "flatpak-bin"
+        bindir.mkdir()
+        (bindir / "flatpak").write_text(FAKE_FLATPAK)
+        (bindir / "flatpak").chmod(0o755)
+        os.environ.update(PATH=f"{bindir}:{os.environ['PATH']}", FAKE_FLATPAK_LOG=str(self.tmp / "fp.log"),
+                          FAKE_FLATPAK_DB=str(self.tmp / "fp.db"))
+        self.win.show_stores()
+        page = self.win.stores
+        self.wait_for(lambda: page.installed is not None)
+        self.assertIn("Not added yet  ·  installs from Flathub", page.list.item(0).text())
+        self.answers = [0]  # Add to Steam
+        page._activate(page.list.item(0))
+        self.assertEqual(self.asked[-1], "Add Heroic Games Launcher to Steam?")
+        self.wait_for(lambda: "In Steam  ·  app installed ✓" in page.list.item(0).text())
+        app = core.Library(self.paths).load()[0]
+        self.assertEqual(app.kind, "store")
+        self.assertTrue(app.artwork)
+        self.win.go_home()
+        self.assertFalse(self.win.home.manage_btn.isVisible())  # a store's Linux app isn't an "installed program"
+        self.win.show_stores()
+        self.answers = [0, 0]  # Remove it; Remove (confirm)
+        page._activate(page.list.item(0))
+        self.assertEqual(self.asked[-1], "Remove Heroic Games Launcher?")
+        self.wait_for(lambda: core.Library(self.paths).load() == [])
+        self.assertEqual(core.steam_shortcuts([self.steam]), [])
+        self.wait_for(lambda: "Not added yet" in page.list.item(0).text())
 
     def test_remove_duplicate_shortcuts_only_with_steam_closed(self):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"

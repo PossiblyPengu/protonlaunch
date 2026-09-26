@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import __version__, addons, artwork, core, streaming, theme, updater
+from . import __version__, addons, artwork, core, stores, streaming, theme, updater
 from .nav import Nav
 from .widgets import ElideLabel, HintBar, Sheet, Steps, Tile, Toast, breakable, button, draw_glyph, label
 
@@ -141,10 +141,10 @@ class InstallThread(QThread):
     failed = pyqtSignal(str)
     cancelled = pyqtSignal()
 
-    def __init__(self, installer: Path, paths: core.Paths, allow_no_container: bool = False):
+    def __init__(self, installer: Path, paths: core.Paths, allow_no_container: bool = False, name: str = ""):
         super().__init__()
         self.job = core.Installer(installer, paths, status=self.status.emit, log=self.log.emit,
-                                  allow_no_container=allow_no_container)
+                                  allow_no_container=allow_no_container, name=name)
 
     def run(self) -> None:
         try:
@@ -555,13 +555,13 @@ class InstallPage(Page):
 
     IDLE_HINT_AFTER = 45  # seconds without anything written while the installer runs
 
-    def reset(self, installer: Path) -> None:
+    def reset(self, installer: Path, name: str = "") -> None:
         self.installer, self.stage, self.meter = Path(installer), "", None
         self.expected = core.files_size(core.installer_files(Path(installer)))
         self.written.setText("")
         self.idle.hide()
         self.bar.setRange(0, 0)
-        self.heading.setText(f"Installing {core.guess_name(installer)}")
+        self.heading.setText(f"Installing {name or core.guess_name(installer)}")
         self.source.setText(str(installer))
         self.steps.set_step(0)
         self.status.setText("Getting ready…")
@@ -943,6 +943,171 @@ class InstalledPage(Page):
         return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
 
 
+class StoresPage(Page):
+    """Game stores other than Steam: their apps added to Steam (Linux apps from Flathub, Windows apps with Proton)."""
+
+    title = "Game stores"
+
+    def __init__(self, win):
+        super().__init__(win)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(*PAGE_MARGINS)
+        lay.setSpacing(12)
+        lay.addWidget(label("Game stores", "h1"))
+        lay.addWidget(label("Pick a store to add its app to Steam, then sign in and play its games from there. Heroic "
+                            "and itch are made for Linux; the others are the stores' own Windows apps, installed with "
+                            "Proton. Games whose anti-cheat blocks Linux won't run, whichever store they're from.",
+                            "dim"))
+        self.list = QListWidget()
+        self.list.setIconSize(QSize(44, 44))
+        on_choose(self.list, self._activate)
+        lay.addWidget(self.list, 1)
+        self.status = label("", "muted")
+        lay.addWidget(self.status)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.hide()
+        lay.addWidget(self.bar)
+        self.installed: set[str] | None = None  # Flatpak apps; read in the background
+        self.apps: dict[str, core.App] = {}  # store id → its app, as Deckhand set it up
+        self.steam: dict[str, str] = {}  # store id → core.steam_state of that app
+        self.outside: dict[str, list[dict]] = {}  # store id → its Steam shortcuts made outside this app
+
+    def refresh(self) -> None:
+        library = self.win.library.load()
+        roots, running = core.steam_roots(), core.steam_is_running()
+        entries = core.steam_shortcuts(roots)
+        self.apps = {s.id: a for s in stores.STORES if (a := stores.installed(s, library)) is not None}
+        self.steam = {i: core.steam_state(a, roots, running, entries) for i, a in self.apps.items()}
+        self.outside = {s.id: stores.spots(s, entries, self.win.paths.launchers) for s in stores.STORES}
+        row = max(0, self.list.currentRow())
+        self.list.clear()
+        for s in stores.STORES:
+            it = QListWidgetItem(badge_icon(s.name, s.color), self._text(s))
+            it.setData(Qt.ItemDataRole.UserRole, s.id)
+            self.list.addItem(it)
+        self.list.setCurrentRow(min(row, self.list.count() - 1))
+        if self.installed is None and not self.win.busy_with_quietly("store-flatpaks"):
+            self.win.run_worker(lambda _s: stores.detect(), self._got_installed, lambda _m: None,
+                                kind="store-flatpaks")
+
+    def _got_installed(self, apps: set[str]) -> None:
+        self.installed = apps
+        if self.win.stack.currentWidget() is self:
+            self.refresh()
+
+    def _text(self, s: stores.Store) -> str:
+        parts = [s.blurb]
+        if s.id in self.apps:
+            parts += ["Installed"] if s.is_windows else []
+            parts.append(STEAM_STATE[self.steam.get(s.id, "out")])
+        elif self.outside.get(s.id):
+            parts.append("In Steam (added outside Deckhand)")
+        else:
+            parts.append("Not installed" if s.is_windows else "Not added yet")
+        if s.is_windows:
+            parts.append("Windows app")
+        elif self.installed is not None:
+            uses = streaming.uses(s.service, self.installed)
+            parts.append("installed (not from Flathub)" if uses.startswith("local:") else
+                         "app installed ✓" if uses in self.installed else "installs from Flathub")
+        return f"{s.name}\n" + "  ·  ".join(parts)
+
+    def _activate(self, item: QListWidgetItem) -> None:
+        s = stores.store(item.data(Qt.ItemDataRole.UserRole))
+        if s is None or self.win.busy_with("store"):
+            return
+        app = self.apps.get(s.id)
+        if app is not None:
+            self._manage(s, app)
+            return
+        outside = self.outside.get(s.id)
+        if outside:
+            names = ", ".join(sorted({str(e.get("AppName", e.get("appname", s.name))) for e in outside}))
+            second = "a second copy" if s.is_windows else "a second shortcut"
+            if Sheet.ask(self, s.name, f"{s.name} is already in your Steam library ({names}), added outside "
+                         f"Deckhand. Nothing to do — open it from there.\n\nAdding it here as well would give you "
+                         f"{second}.", ("Keep what I have", "Add Deckhand's too"), primary=0) != 1:
+                return
+        if s.is_windows:
+            self._install(s)
+        else:
+            self._add(s)
+
+    def _manage(self, s: stores.Store, app: core.App) -> None:
+        """Its app is set up: uninstall it, or put it (back) into Steam."""
+        remove = "Uninstall" if s.is_windows else "Remove it"
+        state = self.steam.get(s.id, "out")
+        text = f"{s.name} is in your Steam library." if state == "in" else \
+            f"{s.name} was sent to Steam — look in your library under Non-Steam." if state == "sent" else \
+            f"{s.name} is set up, but it isn't in your Steam library."
+        if s.is_windows:
+            text += "\n\nUninstalling it also deletes the games you installed inside it."
+        if state in ("in", "sent"):
+            if Sheet.ask(self, s.name, text, (remove, "Close"), primary=1, danger=(0,)) == 0:
+                self.win.uninstall(app)
+            return
+        choice = Sheet.ask(self, s.name, text, ("Add to Steam", remove, "Close"), danger=(1,))
+        if choice == 0:
+            self.win.add_to_steam(app)
+        elif choice == 1:
+            self.win.uninstall(app)
+
+    def _add(self, s: stores.Store) -> None:
+        """A Linux app: from Flathub (unless it's here already), straight into Steam."""
+        if streaming.needs(s.service, self.installed or set()):
+            text = f"Deckhand installs {s.name} from Flathub first (it isn't on this Deck yet). "
+        else:
+            text = f"{s.name} is already installed. "
+        text += "Then it's in your Steam library with its own artwork." + (f"\n\n{s.note}" if s.note else "")
+        if Sheet.ask(self, f"Add {s.name} to Steam?", text, ("Add to Steam", "Cancel")) == 0:
+            self.win.set_up_store(s)
+
+    def _install(self, s: stores.Store) -> None:
+        """A Windows app: download its official installer, then install it like any setup file."""
+        text = (f"Deckhand downloads {s.name}'s official installer (from {s.site}) and installs it like any setup "
+                f"file. Click through the installer; if {s.name} opens by itself at the end, close it or pick "
+                f"“Installer is done — continue”.\n\nThen {s.name} is in your Steam library. Sign in the first time "
+                "you open it; you install and play its games from inside it.") + (f"\n\n{s.note}" if s.note else "")
+        if Sheet.ask(self, f"Install {s.name}?", text, ("Download and install", "Cancel")) != 0:
+            return
+        self.status.setText(f"Downloading {s.name}…")
+
+        def run(status):
+            report = getattr(status, "progress", lambda pct: None)
+
+            def progress(done: int, total: int) -> None:
+                if total:
+                    status(f"Downloading {s.name}…  {core.human_size(done)} of {core.human_size(total)}")
+                    report(done * 100 // total)
+            report(-1)
+            return stores.download(s, self.win.paths, progress)
+
+        def finished(installer: Path) -> None:
+            self.status.setText("")
+            self.show_progress(None)
+            self.win.start_install(installer, name=s.name)
+
+        self.win.run_worker(run, finished, self._failed(s.name), status=self.status.setText, kind="store",
+                            progress=self.show_progress)
+
+    def _failed(self, name: str):
+        def failed(message: str) -> None:
+            self.status.setText("")
+            self.show_progress(None)
+            head, _, rest = message.partition("\n\n")
+            Sheet.ask(self, f"Couldn't set up {name}", head, ("Close",), detail=rest)
+            self.refresh()
+        return failed
+
+    def enter(self) -> None:
+        self.refresh()
+        self.list.setFocus()
+
+    def hints(self):
+        return [("A", "Select", self.win.nav_activate), ("B", "Back", self.back)]
+
+
 class StreamingPage(Page):
     """Cloud gaming and home streaming, set up as Steam shortcuts."""
 
@@ -1173,7 +1338,7 @@ class AddonsPage(Page):
         self.show_progress(-1)
 
         def run(status):
-            script = addons.fetch_decky_installer(self.win.paths.root / "downloads")
+            script = addons.fetch_decky_installer(self.win.paths.downloads)
             status("Decky's installer is open — follow its windows.")
             return addons.run_decky_installer(script)
 
@@ -1341,6 +1506,7 @@ class MainWindow(QMainWindow):
         self.job: core.Installer | None = None
         self.pending: core.PendingInstall | None = None
         self.current_installer: Path | None = None
+        self.current_name = ""  # the name it's installed under ("" = guessed from the file name)
         self.update_info: updater.Update | None = None
         self.update_dismissed = False
         self.update_check: UpdateCheckThread | None = None
@@ -1375,10 +1541,11 @@ class MainWindow(QMainWindow):
         self.done = DonePage(self)
         self.updating = UpdatePage(self)
         self.installed = InstalledPage(self)
+        self.stores = StoresPage(self)
         self.streaming = StreamingPage(self)
         self.addons = AddonsPage(self)
         for p in (self.home, self.browser, self.progress, self.pick, self.done, self.updating, self.installed,
-                  self.streaming, self.addons):
+                  self.stores, self.streaming, self.addons):
             self.stack.addWidget(p)
 
         for lst in self.findChildren(QListWidget):
@@ -1403,7 +1570,7 @@ class MainWindow(QMainWindow):
             self.check_for_updates(manual=False)
 
     # chrome
-    SECTIONS = ("install", "stream", "addons", "installed")
+    SECTIONS = ("install", "stores", "stream", "addons", "installed")
 
     def _rail(self) -> QWidget:
         """Deckhand's sections down the left: tap them, or switch with L1/R1."""
@@ -1418,8 +1585,9 @@ class MainWindow(QMainWindow):
         mark.setContentsMargins(24, 0, 0, 18)
         v.addWidget(mark)
         self.stations: dict[str, QPushButton] = {}
-        for key, text, glyph in (("install", "Install", "download"), ("stream", "Stream", "signal"),
-                                 ("addons", "Add-ons", "plus"), ("installed", "Installed", "stack")):
+        for key, text, glyph in (("install", "Install", "download"), ("stores", "Stores", "bag"),
+                                 ("stream", "Stream", "signal"), ("addons", "Add-ons", "plus"),
+                                 ("installed", "Installed", "stack")):
             b = QPushButton(text)
             b.setObjectName("station")
             b.setCheckable(True)
@@ -1449,6 +1617,8 @@ class MainWindow(QMainWindow):
         return rail
 
     def section_of(self, page: QWidget) -> str | None:
+        if page is self.stores:
+            return "stores"
         if page is self.streaming:
             return "stream"
         if page is self.addons:
@@ -1461,15 +1631,16 @@ class MainWindow(QMainWindow):
 
     def switch_section(self, key: str) -> None:
         current = self.section_of(self.stack.currentWidget())
-        if key == current and self.stack.currentWidget() in (self.home, self.streaming, self.addons, self.installed):
+        if key == current and self.stack.currentWidget() in (self.home, self.stores, self.streaming, self.addons,
+                                                             self.installed):
             self._sync_stations()
             return
         if self.thread is not None or self.pending is not None or self.stack.currentWidget() is self.updating:
             self.flash("Finish what's running first")
             self._sync_stations()
             return
-        {"install": self.go_home, "stream": self.show_streaming, "addons": self.show_addons,
-         "installed": self.show_installed}[key]()
+        {"install": self.go_home, "stores": self.show_stores, "stream": self.show_streaming,
+         "addons": self.show_addons, "installed": self.show_installed}[key]()
 
     def _sync_stations(self) -> None:
         current = self.section_of(self.stack.currentWidget())
@@ -1565,14 +1736,14 @@ class MainWindow(QMainWindow):
         if Sheet.ask(self, f"Install {name}?", text, ("Install", "Cancel")) == 0:
             self.start_install(installer)
 
-    def start_install(self, installer: Path, allow_no_container: bool = False) -> None:
+    def start_install(self, installer: Path, allow_no_container: bool = False, name: str = "") -> None:
         if self.thread is not None:
             return
         installer = Path(installer)
-        self.current_installer = installer
-        self.progress.reset(installer)
+        self.current_installer, self.current_name = installer, name
+        self.progress.reset(installer, name)
         self.go(self.progress)
-        t = InstallThread(installer, self.paths, allow_no_container)
+        t = InstallThread(installer, self.paths, allow_no_container, name)
         t.status.connect(lambda text: self.progress.on_status(text, t.job.stage))
         t.log.connect(self.progress.log.appendPlainText)
         t.done.connect(self.on_installed)
@@ -1605,14 +1776,23 @@ class MainWindow(QMainWindow):
             self.progress.status.setText("Cancelling…")
             self.thread.job.cancel()
 
+    def drop_download(self, installer: Path | None) -> None:
+        """A store's installer that Deckhand downloaded itself is deleted once its install is over
+        (the user never saw it, and the big ones take a few hundred MB)."""
+        if installer is not None and installer.resolve().parent == self.paths.downloads.resolve():
+            installer.unlink(missing_ok=True)
+
     def on_cancelled(self) -> None:
         self.progress.stop()
+        self.drop_download(self.current_installer)
         self.go_home()
         self.flash("Install cancelled")
 
     def on_failed(self, message: str) -> None:
         self.progress.stop()
         self.go_home()
+        if not message.startswith("NO_CONTAINER:"):  # (that one can be continued with the same file)
+            self.drop_download(self.current_installer)
         if message == "NO_RUNTIME":
             if Sheet.ask(self, "Proton is needed", "Deckhand uses Proton to run Windows installers. Steam "
                          "can download it for you — try again when it's done.", ("Install Proton", "Close")) == 0:
@@ -1625,10 +1805,12 @@ class MainWindow(QMainWindow):
                                "it, installers often can't download anything.\n\nSteam can install it (a few "
                                "hundred MB). Run the install again when it's done.",
                                ("Install it", "Continue without it", "Cancel"))
+            if choice == 1 and self.current_installer:
+                self.start_install(self.current_installer, allow_no_container=True, name=self.current_name)
+                return
+            self.drop_download(self.current_installer)
             if choice == 0:
                 QDesktopServices.openUrl(QUrl(f"steam://install/{appid}"))
-            elif choice == 1 and self.current_installer:
-                self.start_install(self.current_installer, allow_no_container=True)
             return
         head, _, rest = message.partition("\n\n")
         Sheet.ask(self, "Install failed", head, ("Close",), detail=rest)
@@ -1676,6 +1858,7 @@ class MainWindow(QMainWindow):
             if self.job:
                 self.job.close()
             shutil.rmtree(self.pending.compat_dir, ignore_errors=True)
+            self.drop_download(self.pending.installer)
             self.pending = None
         self.go_home()
 
@@ -1700,11 +1883,13 @@ class MainWindow(QMainWindow):
         def finished(app: core.App) -> None:
             self.progress.stop()
             self._write_art(app, icon_img)
+            self.drop_download(pending.installer)
             self.done.load(app)
             self.go(self.done)
 
         def failed(message: str) -> None:
             self.progress.stop()
+            self.drop_download(pending.installer)
             Sheet.ask(self, "Couldn't finish", message, ("Close",))
             self.go_home()
 
@@ -1766,6 +1951,8 @@ class MainWindow(QMainWindow):
                 Sheet.ask(self, "Couldn't add to Steam", "No Steam account was found on this Deck.", ("Close",))
             if self.stack.currentWidget() is self.installed:
                 self.installed.enter()
+            elif self.stack.currentWidget() is self.stores:
+                self.stores.refresh()
 
         if self.busy_with("steam"):
             return
@@ -1784,6 +1971,42 @@ class MainWindow(QMainWindow):
             return
         self.go(self.streaming)
 
+    def show_stores(self) -> None:
+        if self.thread is not None:
+            self.flash("Finish the install first")
+            return
+        self.go(self.stores)
+
+    def _say_added(self, app: core.App, retry: str) -> None:
+        """Where an app that was just set up stands in Steam. `retry`: where to add it again from."""
+        msg = {"live": f"{app.name} is in your Steam library",
+               "file": f"{app.name} will be in your Steam library when Steam starts",
+               "requested": f"Sent {app.name} to Steam — look in your library under Non-Steam"}
+        if app.steam_added in msg:
+            self.flash(msg[app.steam_added], ms=5000)
+        elif app.steam_added == "unavailable":
+            Sheet.ask(self, "Couldn't reach Steam", "Steam didn't respond, so nothing was added.\n\n"
+                      + close_steam_first(retry), ("Close",))
+        else:
+            Sheet.ask(self, "Couldn't add to Steam", "No Steam account was found on this Deck.", ("Close",))
+
+    def set_up_store(self, s: stores.Store) -> None:
+        """A store's Linux app (Heroic, itch): from Flathub if needed, into Steam."""
+        page = self.stores
+        page.status.setText(f"Setting up {s.name}…")
+
+        def finished(app: core.App) -> None:
+            page.status.setText("")
+            page.show_progress(None)
+            page.installed = None  # re-read: something may have been installed
+            self._write_art(app, None)
+            self._say_added(app, f"Stores → {s.name}")
+            if self.stack.currentWidget() is page:
+                page.refresh()
+
+        self.run_worker(lambda status: stores.set_up(s, self.paths, status), finished, page._failed(s.name),
+                        status=page.status.setText, kind="store", progress=page.show_progress)
+
     def set_up_stream(self, svc: streaming.Service, better_xcloud: bool | None = None) -> None:
         page = self.streaming
         page.status.setText(f"Setting up {svc.name}…")
@@ -1793,16 +2016,7 @@ class MainWindow(QMainWindow):
             page.show_progress(None)
             page.installed = None  # re-read: something may have been installed
             self._write_art(app, None)
-            msg = {"live": f"{app.name} is in your Steam library",
-                   "file": f"{app.name} will be in your Steam library when Steam starts",
-                   "requested": f"Sent {app.name} to Steam — look in your library under Non-Steam"}
-            if app.steam_added in msg:
-                self.flash(msg[app.steam_added], ms=5000)
-            elif app.steam_added == "unavailable":
-                Sheet.ask(self, "Couldn't reach Steam", "Steam didn't respond, so nothing was added.\n\n"
-                          + close_steam_first("☰ Menu → Game streaming"), ("Close",))
-            else:
-                Sheet.ask(self, "Couldn't add to Steam", "No Steam account was found on this Deck.", ("Close",))
+            self._say_added(app, "☰ Menu → Game streaming")
             if self.stack.currentWidget() is page:
                 page.refresh()
 
@@ -1971,15 +2185,17 @@ class MainWindow(QMainWindow):
         self.go(self.installed)
 
     def uninstall(self, app: core.App, size: int | None = None) -> None:
-        if app.kind == "stream":
-            if Sheet.ask(self, f"Remove {app.name}?", "Removes its Steam shortcut and artwork. The browser or app "
-                         "it uses stays installed.", ("Remove", "Keep"), primary=1, danger=(0,)) != 0:
+        if app.kind in ("stream", "store"):
+            stays = "The browser or app it uses stays installed." if app.kind == "stream" else \
+                f"{app.name} itself stays installed, and so do the games you installed with it."
+            if Sheet.ask(self, f"Remove {app.name}?", f"Removes its Steam shortcut and artwork. {stays}",
+                         ("Remove", "Keep"), primary=1, danger=(0,)) != 0:
                 return
 
             def removed(left_in_steam: bool) -> None:
                 self.flash(f"{app.name} removed")
-                if self.stack.currentWidget() is self.streaming:
-                    self.streaming.refresh()
+                if self.stack.currentWidget() in (self.streaming, self.stores):
+                    self.stack.currentWidget().refresh()
                 if left_in_steam:
                     Sheet.ask(self, f"{app.name} removed", "Its shortcut is still in your Steam library: "
                               "Deckhand doesn't change Steam's list while Steam is open.\n\n" + REMOVE_IN_STEAM,
@@ -2016,6 +2232,8 @@ class MainWindow(QMainWindow):
                     self.installed.enter()
                 else:
                     self.go_home()
+            elif self.stack.currentWidget() is self.stores:
+                self.stores.refresh()
             if left_in_steam:
                 Sheet.ask(self, msg, "Its shortcut is still in your Steam library: Deckhand doesn't change "
                           "Steam's list while Steam is open (Steam would undo it or duplicate it).\n\n"

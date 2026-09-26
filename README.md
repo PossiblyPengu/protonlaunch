@@ -10,7 +10,7 @@ Deckhand is an installer, not a launcher: once something is installed you play i
 2. Click through the installer as usual.
 3. Done: the program is in your Steam library, with its icon and library artwork.
 
-Built for the Deck: four sections down the left (**Install · Stream · Add-ons · Installed**, switch with **L1/R1** or tap), full controller support (D-pad/stick to move, **A** select, **B** back, **X** browse, **☰** menu), big touch targets, button hints along the bottom, and full screen in Game Mode.
+Built for the Deck: five sections down the left (**Install · Stores · Stream · Add-ons · Installed**, switch with **L1/R1** or tap), full controller support (D-pad/stick to move, **A** select, **B** back, **X** browse, **☰** menu), big touch targets, button hints along the bottom, and full screen in Game Mode.
 
 ## What it does for you
 
@@ -27,6 +27,20 @@ Built for the Deck: four sections down the left (**Install · Stream · Add-ons 
 - **Records DirectX setup errors:** if the installer runs Microsoft's DirectX setup, its own error log is copied into Deckhand's install log. (That setup often reports errors under Proton; Proton already includes DirectX, so programs usually run anyway.)
 - **Shows real progress:** how much the installer has written so far and how fast, with an estimate against the installer's size for big installs, and a heads-up when nothing is happening because the installer is waiting for you. Flathub and EmuDeck downloads show a percentage.
 - **Keeps the Deck awake while installing** (when the system allows it), so a long install isn't paused by sleep.
+
+## Game stores
+
+The **Stores** section puts other game stores' apps in your Steam library. Sign in the first time you open one, then
+install and play its games from inside it:
+
+| Store | How |
+| :--- | :--- |
+| **Heroic Games Launcher** (Epic Games, GOG, Amazon), **itch** | Linux apps: installed from Flathub for your user only (no admin password), then added to Steam with their own artwork. Heroic can add each game you install to Steam too. |
+| **Battle.net**, **EA app**, **Ubisoft Connect**, **Epic Games Launcher**, **Amazon Games**, **Rockstar Games Launcher** | Windows apps: Deckhand downloads the store's official installer from its own site and installs it like any setup file — its own Windows setup (prefix), a Steam shortcut, and listed under Installed programs. If the store opens by itself when the installer finishes, close it (or pick **Installer is done — continue**). The downloaded installer is deleted afterwards. |
+
+Uninstalling a Windows store also deletes the games installed inside it. Games whose anti-cheat blocks Linux won't
+run, whichever store they come from. GOG's offline installers don't need a store at all: install them from **Install**
+like any setup file.
 
 ## Game streaming
 
@@ -57,9 +71,10 @@ The **Add-ons** section installs popular Deck add-ons from their official source
 Both set themselves up in Desktop Mode; from Game Mode, Deckhand offers to switch. Each shows whether it's already
 installed.
 
-**Already set up?** Deckhand recognises streaming services you added to Steam yourself (or with a guide or another tool), copies
-of Moonlight or chiaki-ng that aren't from Flathub (AppImages, commands), and NVIDIA's GeForce NOW app. It won't add a second
-shortcut unless you ask. When you pick a setup file, it also warns if your Steam library already has a program by that name.
+**Already set up?** Deckhand recognises streaming services and game stores you added to Steam yourself (or with a guide or
+another tool), store apps you installed from their setup files with Deckhand, copies of Moonlight, chiaki-ng or Heroic that
+aren't from Flathub (AppImages, commands), and NVIDIA's GeForce NOW app. It won't add a second shortcut unless you ask.
+When you pick a setup file, it also warns if your Steam library already has a program by that name.
 
 ## Install (Steam Deck)
 
@@ -86,6 +101,7 @@ Everything Deckhand keeps is in `~/.local/share/deckhand`.
 | :--- | :--- |
 | Installed programs (one prefix each) | `~/.local/share/deckhand/prefixes/<name>/pfx/drive_c` |
 | Launch scripts used by Steam | `~/.local/share/deckhand/launchers/` |
+| Store installers while they install | `~/.local/share/deckhand/downloads/` |
 | Install logs, and each program's last launch (`<name>-launch.log`) | `~/.local/share/deckhand/logs/` |
 | Backup of your Steam shortcuts | `…/userdata/<id>/config/shortcuts.vdf.deckhand-bak` |
 

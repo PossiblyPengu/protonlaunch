@@ -39,7 +39,7 @@ def button(text: str, obj: str = "", slot: Callable | None = None) -> QPushButto
 
 
 def draw_glyph(p: QPainter, r: QRectF, kind: str, color: QColor) -> None:
-    """Simple vector icons (no icon font needed): 'folder', 'download', 'up', 'signal', 'stack', 'disc'."""
+    """Simple vector icons (no icon font needed): 'folder', 'download', 'up', 'signal', 'bag', 'stack', 'disc'…"""
     pen = QPen(color, max(3.0, r.width() * 0.07))
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -84,6 +84,15 @@ def draw_glyph(p: QPainter, r: QRectF, kind: str, color: QColor) -> None:
     elif kind == "menu":
         for k in (0.28, 0.5, 0.72):
             p.drawLine(int(x + w * 0.18), int(y + h * k), int(x + w * 0.82), int(y + h * k))
+    elif kind == "bag":  # game stores: a shopping bag
+        body = QPainterPath()
+        body.moveTo(x + w * 0.14, y + h * 0.34)
+        body.lineTo(x + w * 0.86, y + h * 0.34)
+        body.lineTo(x + w * 0.82, y + h * 0.9)
+        body.lineTo(x + w * 0.18, y + h * 0.9)
+        body.closeSubpath()
+        p.drawPath(body)
+        p.drawArc(QRectF(x + w * 0.33, y + h * 0.1, w * 0.34, h * 0.42), 0, 180 * 16)
     elif kind == "plus":  # add-ons: a rounded square with a plus
         p.drawRoundedRect(r.adjusted(w * 0.08, h * 0.08, -w * 0.08, -h * 0.08), w * 0.18, h * 0.18)
         p.drawLine(int(x + w / 2), int(y + h * 0.3), int(x + w / 2), int(y + h * 0.7))

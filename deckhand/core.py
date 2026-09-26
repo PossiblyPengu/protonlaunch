@@ -58,6 +58,11 @@ class Paths:
         return self.root / "icons"
 
     @property
+    def downloads(self) -> Path:
+        """What Deckhand downloads for itself: a store's installer, Decky's install script."""
+        return self.root / "downloads"
+
+    @property
     def library_file(self) -> Path:
         return self.root / "library.json"
 
@@ -828,7 +833,7 @@ class App:
     args: list[str] = field(default_factory=list)  # arguments from the program's own shortcut
     workdir: str = ""  # folder to start in ("" = the program's folder)
     steam_requested_at: float = 0.0  # when it was handed to the running Steam (steam_added == "requested")
-    kind: str = "program"  # "program" (a Windows program in its own prefix) or "stream" (streaming.py)
+    kind: str = "program"  # "program" (a Windows program in its own prefix), "stream" (streaming.py) or "store"
     options: list[str] = field(default_factory=list)  # e.g. "better-xcloud" for Xbox Cloud Gaming
 
     @property
@@ -1176,8 +1181,10 @@ class Installer:
         log: Callable[[str], None] = lambda s: None,
         steam_roots_override: list[Path] | None = None,
         allow_no_container: bool = False,
+        name: str = "",
     ):
         self.installer = Path(installer).expanduser().resolve()
+        self.name = " ".join(name.split())  # "" = guessed from the installer's file name
         self.paths = paths or Paths.default()
         self.home = Path.home().resolve()
         self.entry: Path | None = None
@@ -1303,7 +1310,7 @@ class Installer:
             if need and container_entry_point(Path(self.runtime.path), self._roots) is None:
                 raise InstallError(f"NO_CONTAINER:{need}")
 
-        name = guess_name(self.installer)
+        name = self.name or guess_name(self.installer)
         app_id = self.library.unique_id(name)
         compat = self.paths.prefixes / app_id
         compat.mkdir(parents=True, exist_ok=True)
