@@ -43,6 +43,7 @@ jobs:
             --windowed \
             --name deckhand \
             --paths . \
+            --add-data deckhand/logos:deckhand/logos \
             deckhand/__main__.py
           cp dist/deckhand deckhand-linux-x86_64
           chmod +x deckhand-linux-x86_64

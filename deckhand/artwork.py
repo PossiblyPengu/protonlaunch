@@ -6,6 +6,7 @@ program's own icon and name and drop it where Steam looks for custom art
 """
 from __future__ import annotations
 
+import functools
 import zlib
 from pathlib import Path
 
@@ -37,6 +38,13 @@ def save_icon(img: QImage, path: Path) -> str:
         img = img.scaled(256, 256, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
     img.save(str(path), "PNG")
     return str(path)
+
+
+@functools.lru_cache(maxsize=None)
+def logo(key: str) -> QImage | None:
+    """A streaming service's, game store's or add-on's own logo (core.logo_file)."""
+    path = core.logo_file(key)
+    return load_icon(str(path)) if path else None
 
 
 def load_icon(path: str) -> QImage | None:

@@ -35,7 +35,7 @@ install and play its games from inside it:
 
 | Store | How |
 | :--- | :--- |
-| **Heroic Games Launcher** (Epic Games, GOG, Amazon), **itch** | Linux apps: installed from Flathub for your user only (no admin password), then added to Steam with their own artwork. Heroic can add each game you install to Steam too. |
+| **Heroic Games Launcher** (Epic Games, GOG, Amazon), **itch** | Linux apps: installed from Flathub for your user only (no admin password), then added to Steam with their own logo and artwork. Heroic can add each game you install to Steam too. |
 | **Battle.net**, **EA app**, **Ubisoft Connect**, **Epic Games Launcher**, **Amazon Games**, **Rockstar Games Launcher** | Windows apps: Deckhand downloads the store's official installer from its own site and installs it like any setup file — its own Windows setup (prefix), a Steam shortcut, and listed under Installed programs. If the store opens by itself when the installer finishes, close it (or pick **Installer is done — continue**). The downloaded installer is deleted afterwards. |
 
 Uninstalling a Windows store also deletes the games installed inside it. Games whose anti-cheat blocks Linux won't
@@ -44,7 +44,7 @@ like any setup file.
 
 ## Game streaming
 
-Home → **Game streaming** (or ☰ Menu) adds streaming services to your Steam library, each with its own artwork:
+Home → **Game streaming** (or ☰ Menu) adds streaming services to your Steam library, each with its own logo and artwork:
 
 | Service | How it runs |
 | :--- | :--- |

@@ -109,6 +109,33 @@ def clean_env() -> dict[str, str]:
     return env
 
 
+# ── Logos of the services, stores and add-ons Deckhand sets up ─────────────
+
+LOGOS = Path(__file__).resolve().parent / "logos"  # bundled with the app (see logos/README.md)
+
+
+def logo_file(key: str) -> Path | None:
+    """The bundled logo of a streaming service, game store or add-on, by its id."""
+    p = LOGOS / f"{key}.png"
+    return p if p.is_file() else None
+
+
+def use_logo(app: "App", paths: Paths, key: str) -> bool:
+    """Make the logo `key` the app's icon (a copy: the bundled one is gone once a single-file build
+    exits). True if it has one now."""
+    logo = logo_file(key)
+    if logo is None:
+        return False
+    target = paths.icons / f"{app.id}.png"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(logo, target)
+    except OSError:
+        return False
+    app.icon = str(target)
+    return True
+
+
 # ── Steam + runtime detection ────────────────────────────────────────────────
 
 

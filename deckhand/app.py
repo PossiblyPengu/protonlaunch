@@ -129,6 +129,14 @@ def badge_icon(name: str, color: str) -> QIcon:
     return QIcon(pm)
 
 
+def logo_icon(key: str, name: str, color: str) -> QIcon:
+    """A service's, store's or add-on's own logo; a badge with its initials if it has none."""
+    img = artwork.logo(key)
+    if img is None:
+        return badge_icon(name, color)
+    return QIcon(pixmap(img, 96, 96))
+
+
 def pixmap(img: QImage, w: int, h: int) -> QPixmap:
     return QPixmap.fromImage(img.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio,
                                         Qt.TransformationMode.SmoothTransformation))
@@ -983,7 +991,7 @@ class StoresPage(Page):
         row = max(0, self.list.currentRow())
         self.list.clear()
         for s in stores.STORES:
-            it = QListWidgetItem(badge_icon(s.name, s.color), self._text(s))
+            it = QListWidgetItem(logo_icon(s.id, s.name, s.color), self._text(s))
             it.setData(Qt.ItemDataRole.UserRole, s.id)
             self.list.addItem(it)
         self.list.setCurrentRow(min(row, self.list.count() - 1))
@@ -1146,7 +1154,7 @@ class StreamingPage(Page):
         row = max(0, self.list.currentRow())
         self.list.clear()
         for svc in streaming.SERVICES:
-            it = QListWidgetItem(badge_icon(svc.name, svc.color), self._text(svc, apps.get(f"stream-{svc.id}")))
+            it = QListWidgetItem(logo_icon(svc.id, svc.name, svc.color), self._text(svc, apps.get(f"stream-{svc.id}")))
             it.setData(Qt.ItemDataRole.UserRole, svc.id)
             self.list.addItem(it)
         self.list.setCurrentRow(min(row, self.list.count() - 1))
@@ -1296,7 +1304,7 @@ class AddonsPage(Page):
         row = max(0, self.list.currentRow())
         self.list.clear()
         for a in addons.ADDONS:
-            it = QListWidgetItem(badge_icon(a.name, a.color),
+            it = QListWidgetItem(logo_icon(a.id, a.name, a.color),
                                  f"{a.name}\n{a.blurb}  ·  {addons.status(a)}  ·  from {a.site}")
             it.setData(Qt.ItemDataRole.UserRole, a.id)
             self.list.addItem(it)
@@ -1558,6 +1566,7 @@ class MainWindow(QMainWindow):
         self.refresh_launchers()
         ensure_app_icon()
         self.sync_steam_ids()
+        self.add_logos()
         self.go(self.home)
         dupes = core.find_duplicate_shortcuts(None, self.paths.launchers)
         if dupes:
@@ -1999,7 +2008,7 @@ class MainWindow(QMainWindow):
             page.status.setText("")
             page.show_progress(None)
             page.installed = None  # re-read: something may have been installed
-            self._write_art(app, None)
+            self._write_art(app, artwork.load_icon(app.icon))
             self._say_added(app, f"Stores → {s.name}")
             if self.stack.currentWidget() is page:
                 page.refresh()
@@ -2015,7 +2024,7 @@ class MainWindow(QMainWindow):
             page.status.setText("")
             page.show_progress(None)
             page.installed = None  # re-read: something may have been installed
-            self._write_art(app, None)
+            self._write_art(app, artwork.load_icon(app.icon))
             self._say_added(app, "☰ Menu → Game streaming")
             if self.stack.currentWidget() is page:
                 page.refresh()
@@ -2112,6 +2121,16 @@ class MainWindow(QMainWindow):
         entries = core.steam_shortcuts()
         for app in self.library.load():
             if core.sync_steam_appid(app, entries):
+                self._write_art(app, artwork.load_icon(app.icon))
+
+    def add_logos(self) -> None:
+        """Streaming services and store apps added before Deckhand had their logos: use the logo for
+        their Steam artwork and app menu entry. (The shortcut's own small icon stays until it's added
+        to Steam again: Steam's list can't be changed behind a running Steam.)"""
+        for app in self.library.load():
+            if app.kind in ("stream", "store") and not app.icon and core.use_logo(app, self.paths,
+                                                                                 app.id.split("-", 1)[1]):
+                core.write_desktop_entry(app)
                 self._write_art(app, artwork.load_icon(app.icon))
 
     def remove_duplicates(self) -> None:

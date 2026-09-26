@@ -339,6 +339,7 @@ def set_up(svc: Service, paths: core.Paths, status: Callable[[str], None] = lamb
     app.options = [BETTER_XCLOUD] if better_xcloud else []
     app.launcher = app.exe = str(launcher)
     app.installed_at = time.time()
+    core.use_logo(app, paths, svc.id)
     core.write_desktop_entry(app)
     core.add_to_steam(app, roots)
     core.Library(paths).upsert(app)

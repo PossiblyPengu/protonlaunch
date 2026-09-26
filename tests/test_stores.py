@@ -19,6 +19,16 @@ class TestStores(FlatpakEnv):
                 self.assertTrue(s.filename.lower().endswith(core.INSTALLER_SUFFIXES), s.id)
             self.assertTrue(stores._is_named(s, s.name), s.id)  # its own name is recognised
 
+    def test_every_service_store_and_add_on_has_its_logo(self):
+        from deckhand import addons, streaming
+        ids = [s.id for s in streaming.SERVICES] + [s.id for s in stores.STORES] + [a.id for a in addons.ADDONS]
+        self.assertEqual(len(set(ids)), len(ids))  # one logo folder for all of them
+        for i in ids:
+            logo = core.logo_file(i)
+            self.assertIsNotNone(logo, i)
+            self.assertEqual(logo.read_bytes()[:8], b"\x89PNG\r\n\x1a\n", i)
+        self.assertEqual(sorted(p.stem for p in core.LOGOS.glob("*.png")), sorted(ids))  # and nothing else
+
     def test_heroic_comes_from_flathub_and_lands_in_steam_once(self):
         heroic = stores.store("heroic")
         app = stores.set_up(heroic, self.paths, roots=[self.steam])
@@ -27,6 +37,11 @@ class TestStores(FlatpakEnv):
         self.assertEqual((app.kind, app.id, app.name), ("store", "store-heroic", "Heroic Games Launcher"))
         self.assertEqual(Path(app.launcher).name, "store-heroic.sh")
         self.assertTrue(core.in_steam(app, [self.steam]))
+        # Its own logo is its icon, in Steam and the app menu (a copy that outlives a single-file build).
+        self.assertEqual(Path(app.icon), self.paths.icons / "store-heroic.png")
+        self.assertEqual(Path(app.icon).read_bytes(), core.logo_file("heroic").read_bytes())
+        self.assertEqual(core.steam_shortcuts([self.steam])[0][1]["icon"], app.icon)
+        self.assertIn(f"Icon={app.icon}", core.desktop_entry_path(app).read_text())
         self.assertEqual(stores.installed(heroic, core.Library(self.paths).load()).id, app.id)
         stores.set_up(heroic, self.paths, roots=[self.steam])  # again: still one of each
         self.assertEqual(len([c for c in self.calls() if c.startswith("install")]), 1)
@@ -35,6 +50,8 @@ class TestStores(FlatpakEnv):
         # Removing it leaves nothing behind (Heroic itself stays installed).
         self.assertFalse(core.uninstall(app, self.paths, roots=[self.steam]))
         self.assertFalse(Path(app.launcher).exists())
+        self.assertFalse(Path(app.icon).exists())
+        self.assertTrue(core.logo_file("heroic").exists())
         self.assertEqual(core.steam_shortcuts([self.steam]), [])
 
     def test_a_heroic_appimage_is_used_instead_of_flathub(self):

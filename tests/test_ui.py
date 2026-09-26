@@ -444,6 +444,36 @@ class TestWindow(Env):
         finally:
             streaming.install_better_xcloud = orig
 
+    def test_services_stores_and_add_ons_show_their_logos(self):
+        from deckhand import app as app_mod, artwork
+        for page in (self.win.stores, self.win.streaming, self.win.addons):
+            self.win.go(page)
+            for i in range(page.list.count()):
+                it = page.list.item(i)
+                self.assertIsNotNone(artwork.logo(it.data(Qt.ItemDataRole.UserRole)), it.text())
+        # (a key without a logo still gets its initials)
+        self.assertFalse(app_mod.logo_icon("nope", "No Logo", "#123456").isNull())
+        self.shot("streaming")
+
+    def test_a_service_added_before_logos_gets_its_logo(self):
+        from deckhand import app as app_mod, streaming
+        svc = streaming.service("moonlight")
+        installed = {svc.app}
+        launcher = streaming.write_launcher(svc, self.paths, installed)
+        old = core.App(id="stream-moonlight", name="Moonlight", exe=str(launcher), prefix="", runtime_name="",
+                       runtime_kind="", runtime_path="", launcher=str(launcher), kind="stream")
+        core.add_to_steam(old, [self.steam])
+        core.Library(self.paths).upsert(old)
+        win = app_mod.MainWindow(self.paths, use_nav=False, check_updates=False)
+        try:
+            app = core.Library(self.paths).load()[0]
+            self.assertEqual(Path(app.icon), self.paths.icons / "stream-moonlight.png")
+            self.assertTrue(app.artwork and all(Path(f).is_file() for f in app.artwork))
+            self.assertIn(f"Icon={app.icon}", core.desktop_entry_path(app).read_text())
+        finally:
+            win.close()
+            win.deleteLater()
+
     def test_a_service_already_in_steam_is_shown_and_not_added_twice(self):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
         vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {
