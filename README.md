@@ -64,13 +64,13 @@ shortcut unless you ask. When you pick a setup file, it also warns if your Steam
 2. Open **Konsole** and paste:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/protonlaunch/main/get.sh | bash
+curl -fsSL https://raw.githubusercontent.com/PossiblyPengu/deckhand/main/get.sh | bash
 ```
 
 No pip, pacman, or developer mode needed. The script downloads the prebuilt binary and checks its checksum.
 
 - To use Deckhand in Game Mode: **☰ Menu → Add Deckhand to Steam**.
-- **Updates are built in:** when a new version is out, a banner on the home screen offers **Update now**; the download is checksum-verified and Deckhand restarts into it. You can also use **☰ Menu → Check for updates**, or `protonlaunch --update` in Konsole.
+- **Updates are built in:** when a new version is out, a banner on the home screen offers **Update now**; the download is checksum-verified and Deckhand restarts into it. You can also use **☰ Menu → Check for updates**, or `deckhand --update` in Konsole.
 - In Desktop Mode you can also right-click any setup `.exe` → **Open With → Deckhand**.
 - If a program shows "Sent to Steam" but isn't in your library, restart Steam (STEAM button → Power → Restart Steam).
 
@@ -96,10 +96,12 @@ Steam** — or uninstall to free the space.
 
 ## Command line
 
+(`protonlaunch` still works as an alias.)
+
 ```bash
-protonlaunch                         # open the app
-protonlaunch ~/Downloads/setup.exe   # open and offer to install that file
-protonlaunch --update                # update Deckhand itself
+deckhand                             # open the app
+deckhand ~/Downloads/setup.exe       # open and offer to install that file
+deckhand --update                    # update Deckhand itself
 ```
 
 ## Develop

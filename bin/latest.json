@@ -1,5 +1,5 @@
 {
-  "version": "3.1.0",
-  "sha256": "f3abe89b5183b7ac767d0aaa8d787e6683fdd4748352001e7b1f1dfa6cdaeb06",
-  "notes": "Redesign finished: no top bar (free space and Menu moved into the side rail), badges for every service, add-on and program without an icon, installers show their own icons, pages line up, long rows wrap instead of scrolling sideways."
+  "version": "3.1.1",
+  "sha256": "d338cb235b7c0072c80efdfd8183518f41d0eb269013e4f052ce6d4d7cde3d49",
+  "notes": "Ready for the repository's new name (PossiblyPengu/deckhand): updates and the install command work under either name, and the command is now deckhand (protonlaunch still works)."
 }

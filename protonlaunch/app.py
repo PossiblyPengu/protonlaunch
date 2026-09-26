@@ -86,6 +86,20 @@ def on_choose(lst: QListWidget, handler: Callable[[QListWidgetItem], None]) -> N
     lst.itemActivated.connect(activated)
 
 
+def add_deckhand_command() -> None:
+    """Copies installed before the rename (~/.local/bin/protonlaunch, updated in the app) also get
+    the `deckhand` command."""
+    if not getattr(sys, "frozen", False):
+        return
+    exe = Path(sys.executable).resolve()
+    link = exe.parent / "deckhand"
+    if exe.name == "protonlaunch" and not link.exists() and not link.is_symlink():
+        try:
+            link.symlink_to(exe.name)
+        except OSError:
+            pass
+
+
 def rename_menu_entry() -> None:
     """Installs from before the rename have a Desktop Mode menu entry called ProtonLaunch."""
     entry = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "applications/protonlaunch.desktop"
@@ -1288,6 +1302,7 @@ class MainWindow(QMainWindow):
         QApplication.instance().focusChanged.connect(self._focus_changed)
         self.refresh_launchers()
         rename_menu_entry()
+        add_deckhand_command()
         self.sync_steam_ids()
         self.go(self.home)
         dupes = core.find_duplicate_shortcuts(None, self.paths.launchers)

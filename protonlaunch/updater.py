@@ -20,9 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-REPO = "PossiblyPengu/protonlaunch"
+REPO = "PossiblyPengu/deckhand"
+OLD_REPO = "PossiblyPengu/protonlaunch"  # the name before 3.1; GitHub redirects it, but ask it directly too
 BRANCHES = ("main", "claude/steam-deck-windows-install-mkeivr")
-ASSET = "protonlaunch-linux-x86_64"
+ASSET = "protonlaunch-linux-x86_64"  # kept: copies from before the rename download this name
 API = f"https://api.github.com/repos/{REPO}"
 RELEASE_API = f"{API}/releases/latest"
 RAW = f"https://raw.githubusercontent.com/{REPO}"
@@ -134,7 +135,12 @@ def default_sources() -> list[Callable[[], Update | None]]:
     override = os.environ.get("PROTONLAUNCH_UPDATE_BASE")  # for testing: a folder URL with latest.json
     if override:
         return [lambda: from_manifest(override.rstrip("/"))]
-    return [from_release] + [lambda b=b: from_branch(b) for b in BRANCHES]
+    out: list[Callable[[], Update | None]] = []
+    for repo in (REPO, OLD_REPO):  # whichever name the repository has right now
+        api, raw = f"https://api.github.com/repos/{repo}", f"https://raw.githubusercontent.com/{repo}"
+        out.append(lambda api=api: from_release(f"{api}/releases/latest"))
+        out += [lambda b=b, api=api, raw=raw: from_branch(b, api, raw) for b in BRANCHES]
+    return out
 
 
 def check(current: str, sources: list[Callable[[], Update | None]] | None = None,
