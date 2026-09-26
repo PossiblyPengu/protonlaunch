@@ -1,5 +1,5 @@
 {
-  "version": "3.3.1",
-  "sha256": "0eb26d73549899fba1d559d7e80a713f52c4995662b9d852a34736e0cc982940",
-  "notes": "The \"d.\" logo is now only the app icon; inside the app the side rail shows just the deckhand. title."
+  "version": "3.4.0",
+  "sha256": "1ac0118a2e645c02be9c89c689d662a98a6d923a1674721559524bbe472e025f",
+  "notes": "Deckhand's folder is now ~/.local/share/deckhand. It's moved automatically on first start (instantly \u2014 same drive); the old name stays as a link so existing Steam shortcuts keep working, and they're repointed while Steam is closed."
 }

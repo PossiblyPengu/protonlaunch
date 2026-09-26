@@ -79,11 +79,14 @@ No pip, pacman, or developer mode needed. The script downloads the prebuilt bina
 
 ## Where things go
 
+Everything lives in `~/.local/share/deckhand` (before 3.4: `~/.local/share/protonlaunch`; Deckhand moves it on its first start and leaves the old name as a link, so older Steam shortcuts keep working until they're repointed — which happens automatically while Steam is closed).
+
+
 | What | Where |
 | :--- | :--- |
-| Installed programs (one prefix each) | `~/.local/share/protonlaunch/prefixes/<name>/pfx/drive_c` |
-| Launch scripts used by Steam | `~/.local/share/protonlaunch/launchers/` |
-| Install logs, and each program's last launch (`<name>-launch.log`) | `~/.local/share/protonlaunch/logs/` |
+| Installed programs (one prefix each) | `~/.local/share/deckhand/prefixes/<name>/pfx/drive_c` |
+| Launch scripts used by Steam | `~/.local/share/deckhand/launchers/` |
+| Install logs, and each program's last launch (`<name>-launch.log`) | `~/.local/share/deckhand/logs/` |
 | Backup of your Steam shortcuts | `…/userdata/<id>/config/shortcuts.vdf.protonlaunch-bak` |
 
 **Uninstalling:** Home → **Installed programs** (or ☰ Menu → Installed programs). Each program shows its size and

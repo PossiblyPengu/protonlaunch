@@ -443,6 +443,84 @@ class TestSteamShortcuts(Env):
             proc.stdout.close()
 
 
+class TestDataFolderMove(Env):
+    """3.4 moves ~/.local/share/protonlaunch to ~/.local/share/deckhand."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ.pop("XDG_DATA_HOME", None)
+        os.environ.pop("DECKHAND_HOME", None)
+        os.environ.pop("PROTONLAUNCH_HOME", None)
+        self.old = self.home / ".local/share/protonlaunch"
+        self.new = self.home / ".local/share/deckhand"
+        (self.old / "prefixes/cool/pfx/drive_c").mkdir(parents=True)
+        (self.old / "launchers").mkdir()
+        self.old_launcher = self.old / "launchers/cool.sh"
+        self.old_launcher.write_text("#!/bin/bash\n")
+        app = core.App("cool", "Cool", str(self.old / "prefixes/cool/pfx/drive_c/cool.exe"), str(self.old / "prefixes/cool"),
+                       "P", "proton", "/p", launcher=str(self.old_launcher), icon=str(self.old / "icons/cool.png"),
+                       steam_appid=77, steam_added="live", extra_dirs=[str(self.home / "Games/Cool")])
+        core.Library(core.Paths(self.old)).upsert(app)
+        vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
+        vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {
+            "appid": 77, "AppName": "Cool", "Exe": f'"{self.old_launcher}"', "StartDir": f'"{self.old}/prefixes"',
+            "icon": str(self.old / "icons/cool.png")}}}))
+
+    def test_moves_once_and_leaves_a_link(self):
+        root = core.Paths.default().root
+        self.assertEqual(root, self.new)
+        self.assertTrue(self.old.is_symlink())
+        self.assertEqual(self.old.resolve(), self.new.resolve())
+        self.assertTrue((self.new / "prefixes/cool/pfx/drive_c").is_dir())
+        app = core.Library(core.Paths(root)).load()[0]
+        self.assertEqual(app.launcher, str(self.new / "launchers/cool.sh"))
+        self.assertEqual(app.prefix, str(self.new / "prefixes/cool"))
+        self.assertEqual(app.icon, str(self.new / "icons/cool.png"))
+        self.assertEqual(app.extra_dirs, [str(self.home / "Games/Cool")])  # outside: untouched
+        self.assertEqual(core.Paths.default().root, self.new)  # second time: nothing to do
+
+    def test_steam_shortcuts_through_the_old_folder_still_count_and_get_repointed(self):
+        paths = core.Paths.default()
+        app = core.Library(paths).load()[0]
+        self.assertTrue(core.in_steam(app, [self.steam]))  # still "In Steam" via the old spelling
+        self.assertEqual(core.steam_state(app, [self.steam], running=True), "in")
+        _appid, how = core.add_to_steam(app, [self.steam], running=True)
+        self.assertEqual(how, "live")  # recognised: not added a second time
+        self.assertEqual(core.repoint_legacy_shortcuts([self.steam]), 3)
+        e = core.steam_shortcuts([self.steam])[0][1]
+        self.assertEqual(e["Exe"], f'"{self.new}/launchers/cool.sh"')
+        self.assertEqual(e["appid"], 77)  # same shortcut: artwork and playtime stay
+        self.assertEqual(core.repoint_legacy_shortcuts([self.steam]), 0)
+
+    def test_menu_entries_get_their_new_name(self):
+        paths = core.Paths.default()
+        app = core.Library(paths).load()[0]
+        old_entry = core.legacy_desktop_entry_path(app)
+        old_entry.parent.mkdir(parents=True, exist_ok=True)
+        old_entry.write_text("[Desktop Entry]\n")
+        self.assertEqual(core.migrate_desktop_entries(paths), 1)
+        self.assertFalse(old_entry.exists())
+        self.assertIn(f'Exec="{self.new}/launchers/cool.sh"', core.desktop_entry_path(app).read_text())
+
+    def test_postponed_while_a_program_runs_from_the_old_folder(self):
+        import subprocess
+        env = dict(os.environ, WINEPREFIX=str(self.old / "prefixes/cool/pfx"))
+        proc = subprocess.Popen(["sleep", "30"], env=env)
+        try:
+            self.assertEqual(core.Paths.default().root, self.old)
+            self.assertFalse(self.old.is_symlink())
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertEqual(core.Paths.default().root, self.new)
+
+    def test_a_fresh_install_uses_the_new_folder(self):
+        import shutil
+        shutil.rmtree(self.old)
+        self.assertEqual(core.Paths.default().root, self.new)
+        self.assertFalse(self.old.exists())
+
+
 class TestRuntimes(Env):
     def test_prefers_ge(self):
         stock = self.steam / "steamapps/common/Proton 9.0"

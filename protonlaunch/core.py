@@ -36,11 +36,10 @@ class Paths:
 
     @classmethod
     def default(cls) -> "Paths":
-        override = os.environ.get("PROTONLAUNCH_HOME")
+        override = os.environ.get("DECKHAND_HOME") or os.environ.get("PROTONLAUNCH_HOME")
         if override:
             return cls(Path(override).expanduser())
-        xdg = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
-        return cls(Path(xdg) / "protonlaunch")
+        return cls(migrate_legacy_data())
 
     @property
     def prefixes(self) -> Path:
@@ -81,6 +80,92 @@ class Paths:
             tmp = self.state_file.with_suffix(f".{os.getpid()}.tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             os.replace(tmp, self.state_file)
+        except OSError:
+            pass
+
+
+# ── The data folder: ~/.local/share/deckhand (~/.local/share/protonlaunch before 3.4) ──────────
+
+
+def data_home() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+
+
+def legacy_root() -> Path:
+    return data_home() / "protonlaunch"
+
+
+def standard_root() -> Path:
+    return data_home() / "deckhand"
+
+
+def canonical(path: str) -> str:
+    """A path under the old data folder, spelled with the new one (the old one links to it)."""
+    old, new = str(legacy_root()) + "/", str(standard_root()) + "/"
+    return path.replace(old, new)
+
+
+def _used_by_a_running_program(folder: Path) -> bool:
+    """Is a Windows program (or its installer) running from inside `folder` right now?"""
+    key = str(folder).encode() + b"/"
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit() and int(p) != os.getpid()]
+    except OSError:
+        return False
+    for pid in pids:
+        try:
+            env = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            continue
+        if any((kv.startswith(b"WINEPREFIX=") or kv.startswith(b"STEAM_COMPAT_DATA_PATH=")) and key in kv + b"/"
+               for kv in env.split(b"\0")):
+            return True
+    return False
+
+
+def migrate_legacy_data() -> Path:
+    """The data folder, moving ~/.local/share/protonlaunch to ~/.local/share/deckhand the first time.
+
+    Same drive, so it's a rename: instant however big the installed games are. The old name is left as
+    a link to the new folder, so Steam shortcuts that point into it keep working until they're
+    repointed (repoint_legacy_shortcuts, while Steam is closed). Postponed while a program installed
+    with Deckhand is running from the old folder."""
+    old, new = legacy_root(), standard_root()
+    if new.exists() or old.is_symlink() or not old.is_dir():
+        return new if new.exists() or not old.is_dir() else old
+    if _used_by_a_running_program(old):
+        return old
+    try:
+        os.rename(old, new)
+    except OSError:
+        return old
+    try:
+        old.symlink_to(new.name)
+    except OSError:
+        pass
+    _rewrite_library_paths(new / "library.json", str(old), str(new))
+    return new
+
+
+def _rewrite_library_paths(library_file: Path, old: str, new: str) -> None:
+    try:
+        raw = json.loads(library_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+
+    def fix(v):
+        if isinstance(v, str):
+            return new + v[len(old):] if v == old or v.startswith(old + "/") else v
+        if isinstance(v, list):
+            return [fix(x) for x in v]
+        return v
+
+    if isinstance(raw, list):
+        raw = [{k: fix(v) for k, v in item.items()} if isinstance(item, dict) else item for item in raw]
+        tmp = library_file.with_suffix(".migrate.tmp")
+        try:
+            tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+            os.replace(tmp, library_file)
         except OSError:
             pass
 
@@ -1557,7 +1642,8 @@ def dir_size(path: Path, limit: int = 500_000) -> int:
     return total
 
 
-INSTALL_INFO = "protonlaunch-install.json"
+INSTALL_INFO = "deckhand-install.json"
+LEGACY_INSTALL_INFO = "protonlaunch-install.json"
 
 
 def save_install_info(compat: Path, name: str, installer: Path, runtime: Runtime) -> None:
@@ -1572,7 +1658,8 @@ def save_install_info(compat: Path, name: str, installer: Path, runtime: Runtime
 
 def load_install_info(compat: Path) -> dict:
     try:
-        info = json.loads((compat / INSTALL_INFO).read_text(encoding="utf-8"))
+        f = compat / INSTALL_INFO
+        info = json.loads((f if f.exists() else compat / LEGACY_INSTALL_INFO).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return info if isinstance(info, dict) else {}
@@ -1684,7 +1771,8 @@ def _unquote(v: object) -> str:
 
 
 def _runs(e: dict, launcher: str) -> bool:
-    return bool(launcher) and launcher in str(e.get("Exe", ""))
+    exe = str(e.get("Exe", ""))
+    return bool(launcher) and (launcher in exe or launcher in canonical(exe))
 
 
 def find_shortcut(launcher: str, roots: Iterable[Path] | None = None, appid: int = 0,
@@ -1752,7 +1840,11 @@ def sync_steam_appid(app: App, entries: list[tuple[Path, dict]]) -> bool:
 
 def desktop_entry_path(app: App) -> Path:
     base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
-    return base / "applications" / f"protonlaunch-{app.id}.desktop"
+    return base / "applications" / f"deckhand-{app.id}.desktop"
+
+
+def legacy_desktop_entry_path(app: App) -> Path:
+    return desktop_entry_path(app).with_name(f"protonlaunch-{app.id}.desktop")
 
 
 def write_desktop_file(path: Path, name: str, exe: str, workdir: str, icon: str,
@@ -1783,10 +1875,28 @@ def write_desktop_entry(app: App) -> Path:
 
 
 def remove_desktop_entry(app: App) -> None:
-    try:
-        desktop_entry_path(app).unlink()
-    except OSError:
-        pass
+    for f in (desktop_entry_path(app), legacy_desktop_entry_path(app)):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
+def migrate_desktop_entries(paths: Paths) -> int:
+    """Menu entries from before the data folder moved: rewrite them under their new name."""
+    moved = 0
+    for app in Library(paths).load():
+        old = legacy_desktop_entry_path(app)
+        if not old.exists():
+            continue
+        try:
+            if app.launcher:
+                write_desktop_entry(app)
+            old.unlink()
+            moved += 1
+        except OSError:
+            continue
+    return moved
 
 
 def request_steam_add(desktop_file: Path) -> bool:
@@ -1839,7 +1949,7 @@ def add_shortcut(name: str, exe: str, start_dir: str, icon: str = "", desktop_fi
         if not exe:
             return 0, ""
         if desktop_file is None or not desktop_file.exists():
-            desktop_file = write_desktop_file(Path("/tmp") / f"protonlaunch-{slugify(name)}.desktop",
+            desktop_file = write_desktop_file(Path("/tmp") / f"deckhand-{slugify(name)}.desktop",
                                               name, exe, start_dir, icon)
         if not request_steam_add(desktop_file):
             return 0, "unavailable"
@@ -1868,6 +1978,32 @@ def add_to_steam(app: App, roots: Iterable[Path] | None = None, running: bool | 
         app.steam_requested_at = sent_at if how == "requested" else 0.0
     app.steam_added = how
     return appid, how
+
+
+def repoint_legacy_shortcuts(roots: Iterable[Path] | None = None) -> int:
+    """Point Steam shortcuts that still go through the old data folder at the new one (only while
+    Steam is closed: the old folder is a link, so they work either way). Returns how many changed."""
+    changed = 0
+    for cfg in steam_user_config_dirs(roots):
+        entries = [e for _c, e in _user_shortcuts(cfg)]
+        fields = ("Exe", "StartDir", "icon")
+        if not any(canonical(str(e.get(k, ""))) != str(e.get(k, "")) for e in entries for k in fields):
+            continue
+
+        def fix(es: list[dict]) -> list[dict]:
+            nonlocal changed
+            for e in es:
+                for k in fields:
+                    if isinstance(e.get(k), str) and canonical(e[k]) != e[k]:
+                        e[k] = canonical(e[k])
+                        changed += 1
+            return es
+
+        try:
+            _edit_shortcuts(cfg, fix)
+        except (OSError, ValueError, TypeError):
+            continue
+    return changed
 
 
 def remove_shortcuts_for(launcher: str, appid: int, roots: Iterable[Path] | None = None) -> None:
@@ -1916,7 +2052,7 @@ def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None, runni
 
 
 def _duplicate_key(e: dict, launchers: Path | None) -> tuple:
-    exe = _unquote(e.get("Exe", ""))
+    exe = canonical(_unquote(e.get("Exe", "")))
     if launchers is not None and exe and Path(exe).parent == launchers:
         return ("launcher", exe)  # one Deckhand program: one shortcut, whatever it's called
     return ("same", exe, _unquote(e.get("StartDir", "")), str(e.get("LaunchOptions", "")),

@@ -1418,6 +1418,7 @@ class MainWindow(QMainWindow):
         self.refresh_launchers()
         rename_menu_entry()
         add_deckhand_command()
+        self.finish_data_move()
         self.sync_steam_ids()
         self.go(self.home)
         dupes = core.find_duplicate_shortcuts(None, self.paths.launchers)
@@ -1920,6 +1921,17 @@ class MainWindow(QMainWindow):
     def busy_with_quietly(self, kind: str) -> bool:
         return any(getattr(w, "kind", "") == kind for w in self.workers)
 
+    def finish_data_move(self) -> None:
+        """The data folder moved to ~/.local/share/deckhand (3.4): catch up everything that pointed at
+        the old one. Cheap when there's nothing left to do."""
+        try:
+            core.migrate_desktop_entries(self.paths)
+            streaming.migrate(self.paths)
+            if not core.steam_is_running():
+                core.repoint_legacy_shortcuts()
+        except Exception:  # noqa: BLE001 — the old folder is a link, so everything still works meanwhile
+            pass
+
     def sync_steam_ids(self) -> None:
         """Steam may give a shortcut an id of its own, or save one we handed it later: follow it, so
         the program's artwork is filed under the id Steam uses."""
@@ -2272,7 +2284,7 @@ class SingleInstance:
 
     Two windows installing at once would race on the same records and prefixes."""
 
-    NAME = f"protonlaunch-{os.getuid()}"
+    NAME = f"deckhand-{os.getuid()}"
 
     def __init__(self) -> None:
         self.server: QLocalServer | None = None

@@ -132,7 +132,7 @@ def spots(svc: Service, entries: list[tuple[Path, dict]], launchers: Path) -> li
     out = []
     for _cfg, e in entries:
         exe = str(e.get("Exe", ""))
-        if str(launchers) in exe:
+        if str(launchers) in core.canonical(exe) or str(launchers) in exe:
             continue  # one of ours
         text = " ".join(str(e.get(k, "")) for k in ("AppName", "appname", "Exe", "LaunchOptions")).lower()
         if re.search(svc.spot, text) and e not in out:
@@ -175,7 +175,33 @@ def app_name(app_id: str) -> str:
 
 def better_xcloud_dir() -> Path:
     """Inside Chromium's own data folder, which its sandbox can always read."""
-    return Path.home() / ".var/app" / CHROMIUM / "data/protonlaunch-better-xcloud"
+    return Path.home() / ".var/app" / CHROMIUM / "data/deckhand-better-xcloud"
+
+
+def migrate(paths: core.Paths) -> int:
+    """After the data folder moved: move Better xCloud's files too, and rewrite streaming launchers
+    that still name the old places. Returns how many launchers were rewritten."""
+    old_bx = better_xcloud_dir().with_name("protonlaunch-better-xcloud")
+    if old_bx.is_dir() and not better_xcloud_dir().exists():
+        try:
+            os.rename(old_bx, better_xcloud_dir())
+        except OSError:
+            pass
+    stale = []
+    for app in core.Library(paths).load():
+        svc = service(app.id.removeprefix("stream-")) if app.kind == "stream" else None
+        try:
+            text = Path(app.launcher).read_text(encoding="utf-8") if svc else ""
+        except OSError:
+            continue
+        if svc and ("protonlaunch-better-xcloud" in text or str(core.legacy_root()) + "/" in text):
+            stale.append((svc, app))
+    if not stale:
+        return 0
+    installed = detect(installed_apps())
+    for svc, app in stale:
+        write_launcher(svc, paths, installed, BETTER_XCLOUD in app.options)
+    return len(stale)
 
 
 def install_better_xcloud(dest: Path | None = None, fetch: Callable[[str], bytes] | None = None) -> str:
