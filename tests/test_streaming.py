@@ -13,7 +13,9 @@ echo "$@" >> "$FAKE_FLATPAK_LOG"
 db="$FAKE_FLATPAK_DB"
 case "$1" in
   list) cat "$db" 2>/dev/null ;;
+  remotes) [ -n "$FAKE_FLATPAK_NO_SYSTEM" ] || echo flathub ;;
   install) [ -n "$FAKE_FLATPAK_FAIL" ] && { echo "error: no network"; exit 1; }
+           [ "$2" = --system ] && [ -n "$FAKE_FLATPAK_SYSTEM_DENIED" ] && { echo "error: Not authorized"; exit 1; }
            echo "Installing ${@: -1}"; echo "${@: -1}" >> "$db" ;;
 esac
 exit 0
@@ -42,7 +44,7 @@ class TestStreaming(FlatpakEnv):
         svc = streaming.service("xbox-cloud")
         app = streaming.set_up(svc, self.paths, roots=[self.steam])
         calls = self.calls()
-        self.assertIn("install --user -y --noninteractive flathub com.google.Chrome", calls)
+        self.assertIn("install --system -y --noninteractive flathub com.google.Chrome", calls)
         self.assertIn("override --user --filesystem=/run/udev:ro com.google.Chrome", calls)
         script = Path(app.launcher).read_text()
         self.assertIn("flatpak run com.google.Chrome --kiosk", script)
@@ -64,7 +66,7 @@ class TestStreaming(FlatpakEnv):
 
     def test_home_streaming_app(self):
         app = streaming.set_up(streaming.service("moonlight"), self.paths, roots=[self.steam])
-        self.assertIn("install --user -y --noninteractive flathub com.moonlight_stream.Moonlight", self.calls())
+        self.assertIn("install --system -y --noninteractive flathub com.moonlight_stream.Moonlight", self.calls())
         self.assertIn("exec flatpak run com.moonlight_stream.Moonlight", Path(app.launcher).read_text())
 
     def test_setting_up_twice_keeps_one_shortcut(self):
@@ -73,6 +75,21 @@ class TestStreaming(FlatpakEnv):
         streaming.set_up(svc, self.paths, roots=[self.steam])
         self.assertEqual(len(core.steam_shortcuts([self.steam])), 1)
         self.assertEqual(len(core.Library(self.paths).load()), 1)
+
+    def test_installs_system_wide_like_discover_or_falls_back_to_the_user(self):
+        self.assertEqual(streaming.install_app("com.google.Chrome"), "system")
+        self.assertIn("install --system -y --noninteractive flathub com.google.Chrome", self.calls())
+        self.assertFalse([c for c in self.calls() if "--user" in c and c.startswith("install")])
+        os.environ["FAKE_FLATPAK_SYSTEM_DENIED"] = "1"
+        lines = []
+        self.assertEqual(streaming.install_app("com.moonlight_stream.Moonlight", lines.append), "user")
+        self.assertIn("remote-add --user --if-not-exists flathub " + streaming.FLATHUB, self.calls())
+        self.assertIn("install --user -y --noninteractive flathub com.moonlight_stream.Moonlight", self.calls())
+        self.assertTrue(any("for this user instead" in line for line in lines))
+        del os.environ["FAKE_FLATPAK_SYSTEM_DENIED"]
+        os.environ["FAKE_FLATPAK_NO_SYSTEM"] = "1"  # no system-wide Flathub at all: straight to the user
+        self.assertEqual(streaming.install_app("org.chromium.Chromium"), "user")
+        self.assertNotIn("install --system -y --noninteractive flathub org.chromium.Chromium", self.calls())
 
     def test_failed_install_explains_and_adds_nothing(self):
         os.environ["FAKE_FLATPAK_FAIL"] = "1"
@@ -93,7 +110,7 @@ class TestStreaming(FlatpakEnv):
         self.flatpak_db.write_text("com.google.Chrome\n")
         svc = streaming.service("xbox-cloud")
         app = streaming.set_up(svc, self.paths, roots=[self.steam], better_xcloud=True, fetch=self._fake_bx)
-        self.assertIn("install --user -y --noninteractive flathub org.chromium.Chromium", self.calls())
+        self.assertIn("install --system -y --noninteractive flathub org.chromium.Chromium", self.calls())
         self.assertIn("override --user --filesystem=/run/udev:ro org.chromium.Chromium", self.calls())
         ext = streaming.better_xcloud_dir()
         manifest = json.loads((ext / "manifest.json").read_text())

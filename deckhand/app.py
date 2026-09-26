@@ -954,8 +954,9 @@ class StreamingPage(Page):
         lay.setContentsMargins(*PAGE_MARGINS)
         lay.setSpacing(12)
         lay.addWidget(label("Game streaming", "h1"))
-        lay.addWidget(label("Pick a service to add it to Steam. Deckhand installs what it needs and sets up the "
-                            "controller. Sign in the first time you open it; leave with STEAM → Exit game.", "dim"))
+        lay.addWidget(label("Pick a service to add it to Steam. Apps it needs come from Flathub, just like in "
+                            "Discover, so Discover keeps them up to date. Sign in the first time you open it; leave "
+                            "with STEAM → Exit game.", "dim"))
         self.on_deck = label("Checking what's installed…", "muted")
         lay.addWidget(self.on_deck)
         self.list = QListWidget()
@@ -1059,7 +1060,8 @@ class StreamingPage(Page):
                 return
         need = streaming.needs(svc, installed)
         if need:
-            what = f"Deckhand installs {streaming.app_name(need)} from Flathub first (it isn't on this Deck yet). "
+            what = (f"Deckhand installs {streaming.app_name(need)} from Flathub first, the same as Discover would, "
+                    "so Discover keeps it up to date. ")
         elif svc.is_web:
             what = f"It opens in {streaming.app_name(streaming.uses(svc, installed))}, which is already installed. "
         else:
@@ -1115,7 +1117,7 @@ class AddonsPage(Page):
         lay.setSpacing(12)
         lay.addWidget(label("Add-ons", "h1"))
         lay.addWidget(label("Popular Deck add-ons, downloaded from their official sources and set up with their own "
-                            "installers. Both set themselves up in Desktop Mode.", "dim"))
+                            "installers. Both set themselves up in Desktop Mode and keep themselves up to date.", "dim"))
         self.list = QListWidget()
         self.list.setIconSize(QSize(44, 44))
         on_choose(self.list, self._activate)

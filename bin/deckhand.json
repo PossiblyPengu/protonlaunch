@@ -1,5 +1,5 @@
 {
-  "version": "4.0.0",
-  "sha256": "26950f2817c9b6f0fcb08ea23dcbbd76fd85c414a755bdaa63f988bb249e73e8",
-  "notes": "Deckhand 4.0: fully renamed \u2014 the app, its command, its download and its folder (~/.local/share/deckhand) are all called deckhand now."
+  "version": "4.1.0",
+  "sha256": "2412012077489b7837884096c261bebc5bc74d82bbcd5c74669b505f318c42df",
+  "notes": "Streaming apps (Chrome, Chromium, Edge, Moonlight, chiaki-ng) are now installed from Flathub the way Discover does it, so they show up in Discover and it keeps them up to date."
 }
