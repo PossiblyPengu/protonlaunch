@@ -169,8 +169,12 @@ class Env(unittest.TestCase):
         os.environ.pop("PROTONLAUNCH_NO_CONTAINER", None)
         (self.home / "Downloads").mkdir(parents=True)
         os.environ["HOME"] = str(self.home)
+        # Steam is closed unless a test says otherwise (a real one on this machine mustn't matter).
+        self._real_steam_is_running = core.steam_is_running
+        core.steam_is_running = lambda: False
 
     def tearDown(self):
+        core.steam_is_running = self._real_steam_is_running
         os.environ.clear()
         os.environ.update(self.env_backup)
         import shutil
@@ -276,6 +280,8 @@ class TestFindingInstallers(unittest.TestCase):
             files = core.installer_files(exe)
             self.assertEqual(sorted(f.name for f in files),
                              ["SETUP_X.BIN", "setup_x-1.bin", "setup_x-2.bin", "setup_x.exe"])
+            listed = list(Path(d).iterdir())
+            self.assertEqual(sorted(core.installer_files(exe, listed)), sorted(files))  # same, from a listing
             self.assertEqual(core.delete_files(files), 35)
             self.assertEqual([p.name for p in Path(d).iterdir()], ["other-1.bin"])
 
@@ -355,6 +361,55 @@ class TestSteamShortcuts(Env):
         core.remove_steam_shortcut(appid, roots=[self.steam])
         sc = core.vdf_loads((cfg / "shortcuts.vdf").read_bytes())["shortcuts"]
         self.assertEqual([e["AppName"] for e in sc.values()], ["Other"])
+
+    def test_duplicates_are_found_and_removed_keeping_one_of_each(self):
+        cfg = self.steam / "userdata/12345/config"
+        launchers = self.tmp / "launchers"
+
+        def sc(appid, name, exe, **kw):
+            return {"appid": appid, "AppName": name, "Exe": exe, "StartDir": '"/g"', "LaunchOptions": "", **kw}
+
+        entries = [sc(1, "Emu", '"/emu"'), sc(2, "Game", f'"{launchers}/game.sh"'), sc(1, "Emu", '"/emu"'),
+                   sc(3, "Emu", '"/emu"', LaunchOptions="-x"),  # different options: a different shortcut
+                   sc(4, "My Game", f'"{launchers}/game.sh"'),  # same program, another name: still a copy
+                   sc(5, "Emu", '"/emu"')]
+        (cfg / "shortcuts.vdf").write_bytes(core.vdf_dumps({"shortcuts": {str(i): e for i, e in enumerate(entries)}}))
+        self.assertEqual(sorted(core.find_duplicate_shortcuts([self.steam], launchers)), ["Emu", "Emu", "My Game"])
+        n = core.remove_duplicate_shortcuts([self.steam], launchers, keep=[4])  # 4: the id ProtonLaunch uses
+        self.assertEqual(n, 3)
+        left = [(e["appid"], e["AppName"]) for _c, e in core.steam_shortcuts([self.steam])]
+        self.assertEqual(left, [(1, "Emu"), (3, "Emu"), (4, "My Game")])
+        self.assertTrue((cfg / "shortcuts.vdf.before-dedupe").exists())
+        self.assertEqual(core.find_duplicate_shortcuts([self.steam], launchers), [])
+        self.assertEqual(core.remove_duplicate_shortcuts([self.steam], launchers), 0)
+
+    def test_sync_adopts_the_id_steam_gave_the_shortcut(self):
+        app = core.App("g", "Game", "/x.exe", "/p", "P", "proton", "/p", launcher="/l/game.sh", steam_appid=5,
+                       steam_added="requested", steam_requested_at=1.0)
+        entries = [(Path("/c"), {"appid": 9, "Exe": '"/l/game.sh"'})]
+        self.assertTrue(core.sync_steam_appid(app, entries))
+        self.assertEqual((app.steam_appid, app.steam_added, app.steam_requested_at), (9, "live", 0.0))
+        self.assertFalse(core.sync_steam_appid(app, entries))
+        self.assertFalse(core.sync_steam_appid(app, []))
+
+    def test_game_mode_always_counts_as_steam_running(self):
+        os.environ["XDG_CURRENT_DESKTOP"] = "gamescope"
+        self.assertTrue(self._real_steam_is_running())
+
+    def test_steam_is_running_sees_a_process_named_steam(self):
+        import subprocess
+        code = ("import ctypes, time\n"
+                "ctypes.CDLL(None).prctl(15, b'steam', 0, 0, 0)\n"  # PR_SET_NAME
+                "print(flush=True)\n"
+                "time.sleep(30)\n")
+        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE)
+        try:
+            proc.stdout.readline()
+            self.assertTrue(self._real_steam_is_running())
+        finally:
+            proc.kill()
+            proc.wait()
+            proc.stdout.close()
 
 
 class TestRuntimes(Env):
@@ -603,6 +658,59 @@ class TestInstallFlow(Env):
         self.assertFalse(Path(app.prefix).exists())
         self.assertFalse(core.in_steam(app, [self.steam]))
 
+    def test_orphan_prefixes_are_the_ones_no_program_uses(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        left = self.paths.prefixes / "cool-game-2"
+        (left / "pfx").mkdir(parents=True)
+        self.assertEqual(core.orphan_prefixes(self.paths), [left])
+        self.assertTrue(Path(app.prefix).exists())
+
+    def test_an_interrupted_install_can_be_finished_later(self):
+        job = self.job()
+        pending = job.run()
+        job.close()  # ProtonLaunch closed before the program was picked
+        z = pending.pfx / "dosdevices/z:"
+        z.unlink()
+        z.symlink_to(self.home)  # as if the install was cut off while Z: pointed at home
+        self.assertEqual(core.orphan_prefixes(self.paths), [pending.compat_dir])
+        self.assertFalse(core.prefix_in_use(pending.compat_dir))
+        again = core.resume_install(self.paths, pending.compat_dir, [self.steam])
+        self.assertEqual((again.id, again.name, again.installer), (pending.id, pending.name, pending.installer))
+        self.assertEqual(again.runtime, pending.runtime)
+        self.assertEqual(again.candidates[0].exe, pending.candidates[0].exe)
+        self.assertEqual(os.readlink(z), "/")
+        app = core.Installer(again.installer, self.paths, runtime=again.runtime,
+                             steam_roots_override=[self.steam]).finish(again, again.candidates[0].exe)
+        self.assertTrue(core.in_steam(app, [self.steam]))
+        self.assertEqual(core.orphan_prefixes(self.paths), [])
+
+    def test_resume_finds_nothing_in_an_empty_prefix(self):
+        (self.paths.prefixes / "x/pfx/drive_c").mkdir(parents=True)
+        self.assertIsNone(core.resume_install(self.paths, self.paths.prefixes / "x", [self.steam]))
+
+    def test_prefix_in_use_sees_a_process_running_in_it(self):
+        import subprocess
+        compat = self.paths.prefixes / "busy"
+        env = dict(os.environ, WINEPREFIX=str(compat / "pfx"))
+        proc = subprocess.Popen(["sleep", "30"], env=env)
+        try:
+            self.assertTrue(core.prefix_in_use(compat))
+            self.assertFalse(core.prefix_in_use(self.paths.prefixes / "other"))
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_directx_log_is_read_even_in_utf16(self):
+        windows = self.tmp / "pfx/drive_c/windows"
+        windows.mkdir(parents=True)
+        self.assertEqual(core.directx_log(self.tmp / "pfx"), "")
+        (windows / "DXError.log").write_bytes("line one\r\nDXSetup: internal error 42\r\n".encode("utf-16"))
+        text = core.directx_log(self.tmp / "pfx")
+        self.assertIn("DXError.log", text)
+        self.assertIn("internal error 42", text)
+
     def test_program_dirs(self):
         h = self.home.resolve()
         exe = h / "Games/Cool Game/bin/x.exe"
@@ -672,12 +780,49 @@ class TestInstallFlow(Env):
         self.assertIn(f'Exec="{app.launcher}"', entry)
         self.assertIn("Categories=Game;", entry)
 
-    def test_running_steam_that_ignores_the_request_falls_back_to_the_file(self):
+    def test_running_steam_is_asked_once_and_its_file_never_edited(self):
         app = self._installed_app()
-        self._fake_steam(behaves=False)
+        vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
+        os.utime(vdf, (time.time() - 60, time.time() - 60))
+        before = vdf.read_bytes()
+        self._fake_steam(behaves=False)  # Steam takes it but hasn't saved its list yet
         appid, how = core.add_to_steam(app, [self.steam], running=True, wait=1)
-        self.assertEqual(how, "file")
-        self.assertTrue(core.in_steam(app, [self.steam]))
+        self.assertEqual(how, "requested")
+        self.assertEqual((app.steam_added, app.steam_appid), ("requested", appid))
+        self.assertEqual(vdf.read_bytes(), before)  # editing it behind Steam's back makes duplicates
+        self.assertEqual(core.steam_state(app, [self.steam], running=True), "sent")
+        self.assertEqual(core.steam_state(app, [self.steam], running=False), "out")  # Steam quit without it
+        os.utime(vdf, (time.time() + 5, time.time() + 5))  # Steam saved its list, and it isn't there
+        self.assertEqual(core.steam_state(app, [self.steam], running=True), "out")
+
+    def test_already_in_steam_is_never_added_again(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        self._fake_steam(behaves=True)
+        for running in (True, False):
+            appid, how = core.add_to_steam(app, [self.steam], running=running, wait=2)
+            self.assertEqual((how, appid), ("live", app.steam_appid))
+        self.assertEqual(len(core.steam_shortcuts([self.steam])), 1)
+
+    def test_running_steam_that_cant_be_reached_changes_nothing(self):
+        app = self._installed_app()
+        before = (self.steam / "userdata/12345/config/shortcuts.vdf").read_bytes()
+        os.environ["PATH"] = str(self.tmp / "empty-bin")  # no steam, no xdg-open
+        appid, how = core.add_to_steam(app, [self.steam], running=True, wait=1)
+        self.assertEqual(how, "unavailable")
+        self.assertEqual((self.steam / "userdata/12345/config/shortcuts.vdf").read_bytes(), before)
+
+    def test_uninstall_while_steam_runs_leaves_steams_list_alone(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
+        before = vdf.read_bytes()
+        self.assertTrue(core.uninstall(app, self.paths, roots=[self.steam], running=True))
+        self.assertEqual(vdf.read_bytes(), before)
+        self.assertFalse(Path(app.prefix).exists())
+        self.assertEqual(core.Library(self.paths).load(), [])
 
     def test_steam_closed_edits_the_file(self):
         app = self._installed_app()
@@ -690,6 +835,8 @@ class TestInstallFlow(Env):
         app = job.finish(pending, pending.candidates[0].exe)
         self.assertEqual(app.steam_added, "file")
         self.assertTrue(core.desktop_entry_path(app).exists())
+        log = (self.paths.logs / f"{app.id}.log").read_text()
+        self.assertIn("Steam was closed; its saved shortcut list went from 0 to 1 entries", log)
         core.uninstall(app, self.paths, roots=[self.steam])
         self.assertFalse(core.desktop_entry_path(app).exists())
 

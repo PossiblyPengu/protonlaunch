@@ -17,10 +17,12 @@ Built for the Deck: full controller support (D-pad/stick to move, **A** select, 
 - **Gives each program its own Windows setup (prefix)**, so one program can't break another.
 - **Shows your internal storage as D: in the installer.** Proton normally offers only C: and Z: ("rootfs", SteamOS's small read-only system partition), which makes installers complain about space. While installing, Z: is hidden and D: is your home folder. Z: comes back afterwards so the program runs normally.
 - **Finds the installed program** from the shortcuts its installer made, skipping uninstallers, redistributables and crash reporters. If it can't tell, it shows its best guesses with their icons. Launches it the way its shortcut does, with the same arguments and start folder.
-- **Adds it to Steam.** While Steam is running, ProtonLaunch asks Steam itself to add the program (the same hand-off SteamOS's own "Add to Steam" uses) and checks that it arrived — no restart needed. Editing Steam's shortcut file while Steam runs doesn't stick: Steam writes its own list back when it restarts. With Steam closed, the file is edited directly. The program's own icon is used, and library artwork is generated (capsule, wide, hero, logo) so it doesn't show up as a blank tile; artwork you added yourself (SteamGridDB, Decky…) is never overwritten.
+- **Adds it to Steam — once.** While Steam is running, ProtonLaunch hands the program to Steam itself (the same hand-off SteamOS's own "Add to Steam" uses) — no restart needed — and never touches Steam's shortcut file: editing it behind a running Steam gets undone, or turns into duplicate shortcuts. If Steam hasn't saved its list yet, the program shows as "Sent to Steam" rather than being sent again. With Steam closed, the file is edited directly. Nothing that's already in Steam is added a second time. The program's own icon is used, and library artwork is generated (capsule, wide, hero, logo) so it doesn't show up as a blank tile; artwork you added yourself (SteamGridDB, Decky…) is never overwritten. If Steam files the shortcut under an ID of its own, ProtonLaunch moves the artwork to it.
 - **Adds it to the Desktop Mode app menu** (under Games), removed again on uninstall.
 - **Frees space afterwards:** one tap deletes the installer, including GOG-style `.bin` parts.
 - **Handles programs that need no install:** if the file *is* the program, it's added as-is — with its folder, if you want (portable programs usually need the files next to them).
+- **Picks up interrupted installs:** if an install never finished (ProtonLaunch was closed mid-install, the Deck turned off…), it shows up under Installed programs as an unfinished install: **Finish setup** adds what it installed to Steam without reinstalling, or delete it to free the space. ProtonLaunch also offers this when it opens, and never touches a folder whose installer is still running.
+- **Records DirectX setup errors:** if the installer runs Microsoft's DirectX setup, its own error log is copied into ProtonLaunch's install log. (That setup often reports errors under Proton; Proton already includes DirectX, so programs usually run anyway.)
 - **Keeps the Deck awake while installing** (when the system allows it), so a long install isn't paused by sleep.
 
 ## Install (Steam Deck)
@@ -37,7 +39,7 @@ No pip, pacman, or developer mode needed. The script downloads the prebuilt bina
 - To use ProtonLaunch in Game Mode: **☰ Menu → Add ProtonLaunch to Steam**.
 - **Updates are built in:** when a new version is out, a banner on the home screen offers **Update now**; the download is checksum-verified and ProtonLaunch restarts into it. You can also use **☰ Menu → Check for updates**, or `protonlaunch --update` in Konsole.
 - In Desktop Mode you can also right-click any setup `.exe` → **Open With → ProtonLaunch**.
-- After installing something, restart Steam (STEAM button → Power → Restart Steam) to see it in your library.
+- If a program shows "Sent to Steam" but isn't in your library, restart Steam (STEAM button → Power → Restart Steam).
 
 ## Where things go
 
@@ -50,8 +52,14 @@ No pip, pacman, or developer mode needed. The script downloads the prebuilt bina
 
 **Uninstalling:** Home → **Installed programs** (or ☰ Menu → Installed programs). Each program shows its size and
 whether it's still in Steam. Uninstalling deletes its Windows folder (including saves kept inside it), its folder on
-D: if it was installed there, and its Steam shortcut, icon and artwork. A program that isn't in Steam (you removed it, or
-Steam dropped it) shows "Not in Steam" and offers **Add to Steam** — or uninstall to free the space.
+D: if it was installed there, and its Steam shortcut, icon and artwork. While Steam is running (always, in Game Mode)
+ProtonLaunch leaves Steam's list alone and tells you to remove the shortcut in Steam (⚙ → Manage → Remove non-Steam
+game). A program that isn't in Steam (you removed it, or Steam dropped it) shows "Not in Steam" and offers **Add to
+Steam** — or uninstall to free the space.
+
+**Duplicate shortcuts:** ☰ Menu → **Remove duplicate Steam shortcuts** keeps one of each and removes the extra copies
+(of any non-Steam shortcut, not just ProtonLaunch's). Steam must be closed for this: in Desktop Mode, exit Steam
+(Steam menu → Exit), then open ProtonLaunch from the app menu. A backup is saved as `shortcuts.vdf.before-dedupe`.
 
 ## Command line
 

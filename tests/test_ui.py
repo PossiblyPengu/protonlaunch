@@ -53,6 +53,7 @@ class TestWindow(Env):
         Sheet.ask = self._orig_ask
         core.steam_roots = self._orig_roots
         self.win.nav and self.win.nav.stop()
+        self.win.pending = None  # (closing would otherwise ask about an unfinished pick)
         self.win.close()
         self.win.deleteLater()
         self.pump()
@@ -304,6 +305,98 @@ class TestWindow(Env):
         self.assertEqual(self.asked[-1], "Cool Game")
         self.wait_for(lambda: "In Steam" in page.list.item(0).text() and "Not in" not in page.list.item(0).text())
         self.assertTrue(core.in_steam(core.Library(self.paths).load()[0], [self.steam]))
+
+    def test_with_steam_running_the_program_is_sent_once_and_followed(self):
+        sent = []
+        orig_request, orig_wait = core.request_steam_add, core.STEAM_ADD_WAIT
+        core.request_steam_add = lambda f: (sent.append(f), True)[1]  # Steam takes it, saves its list later
+        core.STEAM_ADD_WAIT = 0.3
+        core.steam_is_running = lambda: True
+        vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
+        try:
+            self.win.start_install(self.add_installer("Cool Game Setup.exe", 10))
+            self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+            self.assertIn("sent to Steam", self.win.done.heading.text())
+            self.assertEqual(len(sent), 1)
+            self.assertFalse(vdf.exists())  # Steam's own list is never edited while it runs
+            self.win.show_installed()
+            page = self.win.installed
+            self.assertIn("Sent to Steam", page.list.item(0).text())
+            self.answers = [2]  # Cancel: it's probably there already
+            page._activate(page.list.item(0))
+            self.assertEqual(self.asked[-1], "Cool Game")
+            self.pump(10)
+            self.assertEqual(len(sent), 1)
+            # Steam saves its list, with the shortcut under an id of its own: ProtonLaunch follows it.
+            app = core.Library(self.paths).load()[0]
+            vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": {
+                "appid": -1234, "AppName": "Cool Game", "Exe": f'"{app.launcher}"'}}}))
+            self.win.sync_steam_ids()
+            app = core.Library(self.paths).load()[0]
+            self.assertEqual((app.steam_appid, app.steam_added), (-1234 & 0xFFFFFFFF, "live"))
+            self.assertTrue(app.artwork)
+            self.assertTrue(all(Path(a).name.startswith(str(app.steam_appid)) for a in app.artwork))
+            page.refresh()
+            self.assertIn("In Steam", page.list.item(0).text())
+        finally:
+            core.request_steam_add, core.STEAM_ADD_WAIT = orig_request, orig_wait
+
+    def test_leftovers_from_interrupted_installs_are_offered_for_deletion(self):
+        keep, gone = self.paths.prefixes / "kept-one", self.paths.prefixes / "cool-game"
+        for d in (keep, gone):
+            (d / "pfx").mkdir(parents=True)
+            (d / "pfx/big").write_bytes(b"x" * 1000)
+        self.answers = [1]  # Keep: never asked about these again
+        self.win.check_leftovers()
+        self.wait_for(lambda: "Unfinished installs" in self.asked)
+        self.assertTrue(keep.exists() and gone.exists())
+        self.asked.clear()
+        self.win.check_leftovers()
+        self.pump(20)
+        self.assertEqual(self.asked, [])
+        self.paths.remember(kept_leftovers=["kept-one"])
+        self.answers = [0]  # Delete
+        self.win.check_leftovers()
+        self.wait_for(lambda: not gone.exists())
+        self.assertTrue(keep.exists())
+
+    def test_unfinished_install_is_finished_from_installed_programs(self):
+        job = core.Installer(self.add_installer("Cool Game Setup.exe", 10), self.paths,
+                             steam_roots_override=[self.steam])
+        pending = job.run()
+        job.close()  # ProtonLaunch was closed on the pick screen
+        self.win.go_home()
+        self.assertTrue(self.win.home.manage_btn.isVisible())
+        self.assertIn("1 unfinished", self.win.home.manage_btn.text())
+        self.win.show_installed()
+        page = self.win.installed
+        self.assertEqual(page.list.count(), 1)
+        self.assertIn("Unfinished install", page.list.item(0).text())
+        self.answers = [0]  # Finish setup
+        page._activate(page.list.item(0))
+        self.wait_for(lambda: self.win.stack.currentWidget() in (self.win.done, self.win.pick))
+        if self.win.stack.currentWidget() is self.win.pick:
+            self.win.pick.use()
+            self.wait_for(lambda: self.win.stack.currentWidget() is self.win.done)
+        app = core.Library(self.paths).load()[0]
+        self.assertEqual(app.prefix, str(pending.compat_dir))
+        self.assertTrue(core.in_steam(app, [self.steam]))
+
+    def test_remove_duplicate_shortcuts_only_with_steam_closed(self):
+        vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
+        e = {"appid": 1, "AppName": "Emu", "Exe": '"/emu"', "StartDir": '"/"', "LaunchOptions": ""}
+        vdf.write_bytes(core.vdf_dumps({"shortcuts": {"0": e, "1": dict(e), "2": dict(e)}}))
+        core.steam_is_running = lambda: True
+        self.win.remove_duplicates()
+        self.assertEqual(self.asked[-1], "Close Steam first")
+        self.assertEqual(len(core.steam_shortcuts([self.steam])), 3)
+        core.steam_is_running = lambda: False
+        self.answers = [0]  # Remove duplicates
+        self.win.remove_duplicates()
+        self.assertEqual(self.asked[-1], "Remove duplicate shortcuts?")
+        self.assertEqual(len(core.steam_shortcuts([self.steam])), 1)
+        self.win.remove_duplicates()
+        self.assertEqual(self.asked[-1], "No duplicates")
 
     def test_long_paths_never_widen_the_window(self):
         deep = self.downloads.joinpath(*[f"A Rather Long Folder Name Number {i}" for i in range(8)])

@@ -62,6 +62,28 @@ class Paths:
     def library_file(self) -> Path:
         return self.root / "library.json"
 
+    @property
+    def state_file(self) -> Path:
+        return self.root / "state.json"
+
+    def state(self) -> dict:
+        """Small things to remember between runs."""
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def remember(self, **values) -> None:
+        data = {**self.state(), **values}
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            tmp = self.state_file.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            os.replace(tmp, self.state_file)
+        except OSError:
+            pass
+
 
 def clean_env() -> dict[str, str]:
     """Environment for child processes, minus anything a PyInstaller bundle injected."""
@@ -796,9 +818,10 @@ class App:
     icon: str = ""  # PNG extracted from the program's .exe
     artwork: list[str] = field(default_factory=list)  # Steam library images we generated
     extra_dirs: list[str] = field(default_factory=list)  # program folder outside C: (installed to D:)
-    steam_added: str = ""  # how it got into Steam: "live" (Steam confirmed), "file", or "" (not added)
+    steam_added: str = ""  # how it got into Steam: see add_shortcut ("live", "requested", "file", …)
     args: list[str] = field(default_factory=list)  # arguments from the program's own shortcut
     workdir: str = ""  # folder to start in ("" = the program's folder)
+    steam_requested_at: float = 0.0  # when it was handed to the running Steam (steam_added == "requested")
 
     @property
     def runtime(self) -> Runtime:
@@ -1116,6 +1139,7 @@ class Installer:
         self._log_fh = None
         self._proc: subprocess.Popen | None = None
         self._cancelled = False
+        self._directx_logged = False
         self._skip_wait = False
         self.stage = "idle"
         self._env: dict[str, str] | None = None
@@ -1132,6 +1156,11 @@ class Installer:
             self._log_fh.write(msg.rstrip("\n") + "\n")
             self._log_fh.flush()
         self._log_cb(msg.rstrip("\n"))
+
+    def _log_directx(self, pfx: Path) -> None:
+        if not self._directx_logged and (text := directx_log(pfx)):
+            self._directx_logged = True
+            self._log("The installer ran DirectX setup; its log says:\n" + text)
 
     def _stream(self, cmd: list[str]) -> int:
         self._log("$ " + " ".join(shlex.quote(c) for c in cmd))
@@ -1232,6 +1261,7 @@ class Installer:
         self._env = runtime_env(self.runtime, compat, self.steam_root, mounts)
         self.entry = container_entry_point(Path(self.runtime.path), self._roots) if self.runtime.is_proton else None
         self._log(f"ProtonLaunch: installing {self.installer.name} as '{name}'")
+        save_install_info(compat, name, self.installer, self.runtime)
         self._log(f"Runtime: {self.runtime.name} ({self.runtime.path})")
         if self.entry:
             self._log(f"Container: {self.entry.parent.name} (same as Steam)")
@@ -1280,6 +1310,7 @@ class Installer:
                 self._wait_for_wine(ws, inhibit=True)
             if self._cancelled:
                 raise Cancelled()
+            self._log_directx(pfx)  # (DirectX setup often runs after the installer's first window closes)
             restore_system_drive(pfx, hidden_z)
             hidden_z = None
 
@@ -1292,11 +1323,13 @@ class Installer:
             self._log("Candidates: " + ", ".join(f"{c.exe.name}={c.score:.0f}" for c in cands[:8]))
             return PendingInstall(app_id, name, self.installer, compat, self.runtime, cands, log_file, extra)
         except Cancelled:
+            self._log_directx(pfx)
             self._log("Cancelled.")
             self.close()
             shutil.rmtree(compat, ignore_errors=True)
             raise
         except InstallError:
+            self._log_directx(pfx)
             self.close()
             shutil.rmtree(compat, ignore_errors=True)
             raise
@@ -1314,6 +1347,12 @@ class Installer:
 
     def finish(self, pending: PendingInstall, exe: Path, name: str | None = None, icon: str = "") -> App:
         """Save the app, write its launcher and add it to Steam (with `icon`, a PNG path)."""
+        if self._log_fh is None:  # finishing an install from an earlier session: keep adding to its log
+            try:
+                pending.log_file.parent.mkdir(parents=True, exist_ok=True)
+                self._log_fh = open(pending.log_file, "a", encoding="utf-8")
+            except OSError:
+                pass
         self._set("steam", "Adding to Steam…")
         app = App(
             id=pending.id,
@@ -1334,9 +1373,14 @@ class Installer:
         launcher = write_launcher(app, self.paths, self.steam_root, self._roots)
         app.launcher = str(launcher)
         write_desktop_entry(app)
-        app.steam_appid, app.steam_added = add_to_steam(app, self._roots)
+        running = steam_is_running()
+        before = len(steam_shortcuts(self._roots))
+        add_to_steam(app, self._roots, running)
+        after = len(steam_shortcuts(self._roots))
         self.library.upsert(app)
         self._log(f"Installed '{app.name}' → {app.exe} (Steam: {app.steam_added or 'not added'})")
+        self._log(f"Steam was {'running' if running else 'closed'}; its saved shortcut list went from "
+                  f"{before} to {after} entries")
         self.close()
         return app
 
@@ -1464,38 +1508,198 @@ def dir_size(path: Path, limit: int = 500_000) -> int:
     return total
 
 
+INSTALL_INFO = "protonlaunch-install.json"
+
+
+def save_install_info(compat: Path, name: str, installer: Path, runtime: Runtime) -> None:
+    """What's needed to finish this install later, if ProtonLaunch is closed before it's done."""
+    info = {"name": name, "installer": str(installer), "started": time.time(),
+            "runtime": [runtime.name, runtime.kind, runtime.path]}
+    try:
+        (compat / INSTALL_INFO).write_text(json.dumps(info), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def load_install_info(compat: Path) -> dict:
+    try:
+        info = json.loads((compat / INSTALL_INFO).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return info if isinstance(info, dict) else {}
+
+
+def prefix_in_use(compat: Path) -> bool:
+    """Is anything still running in this prefix (e.g. an installer that outlived ProtonLaunch)?"""
+    keys = {f"WINEPREFIX={compat / 'pfx'}".encode(), f"STEAM_COMPAT_DATA_PATH={compat}".encode()}
+    me = os.getpid()
+    try:
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return False
+    for pid in pids:
+        if pid == me:
+            continue
+        try:
+            env = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            continue
+        if any(kv in keys for kv in env.split(b"\0")):
+            return True
+    return False
+
+
+def resume_install(paths: Paths, compat: Path, roots: Iterable[Path] | None = None) -> PendingInstall | None:
+    """Pick up an install that was interrupted after its installer ran: find what it installed.
+    None if there's nothing in it to add."""
+    pfx = compat / "pfx"
+    if not (pfx / "drive_c").is_dir():
+        return None
+    info = load_install_info(compat)
+    name = str(info.get("name") or compat.name.replace("-", " ").title())
+    installer = Path(str(info.get("installer") or compat.name))
+    rt = info.get("runtime")
+    runtime = Runtime(*rt) if isinstance(rt, list) and len(rt) == 3 and Path(rt[2]).exists() else None
+    if runtime is None:
+        runtimes = find_runtimes(roots)
+        if not runtimes:
+            return None
+        runtime = runtimes[0]
+    if (pfx / "dosdevices" / "z:").is_symlink():
+        restore_system_drive(pfx, "/")  # it was pointed at the home folder while installing
+    cands = find_program(pfx, name, installer if installer.is_file() else None, [])
+    if not cands:
+        return None
+    return PendingInstall(compat.name, name, installer, compat, runtime, cands, paths.logs / f"{compat.name}.log")
+
+
+def orphan_prefixes(paths: Paths) -> list[Path]:
+    """Prefixes no installed program uses: left by installs that were interrupted (ProtonLaunch
+    closed or killed mid-install, the Deck turned off…)."""
+    used = {Path(a.prefix).resolve() for a in Library(paths).load()}
+    try:
+        dirs = sorted(d for d in paths.prefixes.iterdir() if d.is_dir() and not d.is_symlink())
+    except OSError:
+        return []
+    return [d for d in dirs if d.resolve() not in used]
+
+
+def directx_log(pfx: Path, lines: int = 25) -> str:
+    """The end of the DirectX setup's own logs (DXError.log, DirectX.log in C:\\Windows), if any."""
+    out = []
+    names = ("dxerror.log", "directx.log")
+    logs: list[Path] = []
+    windows = pfx / "drive_c" / "windows"
+    for d in (windows, windows / "Logs", windows / "logs", windows / "temp"):
+        try:
+            logs += [f for f in d.iterdir() if f.name.lower() in names and f not in logs]
+        except OSError:
+            pass
+    users = pfx / "drive_c" / "users"
+    for dirpath, dirnames, files in os.walk(users) if users.is_dir() else ():
+        if dirpath.count(os.sep) - str(users).count(os.sep) >= 5:
+            dirnames.clear()  # temp folders are shallow; don't crawl the whole profile
+        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+        logs += [Path(dirpath) / f for f in files if f.lower() in names]
+    for f in sorted(set(logs)):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "\x00" in text[:200]:  # UTF-16
+            text = f.read_bytes().decode("utf-16", errors="replace")
+        tail = [ln.rstrip() for ln in text.splitlines() if ln.strip()][-lines:]
+        out.append(f"--- {f.name} (last {len(tail)} lines) ---\n" + "\n".join(tail))
+    return "\n".join(out)
+
+
 def app_size(app: App) -> int:
     return sum(dir_size(p) for p in app_paths(app))
 
 
-def find_shortcut(launcher: str, roots: Iterable[Path] | None = None, appid: int = 0) -> int:
+def _user_shortcuts(cfg: Path) -> list[tuple[Path, dict]]:
+    try:
+        sc = vdf_loads((cfg / "shortcuts.vdf").read_bytes()).get("shortcuts", {})
+    except (OSError, ValueError):
+        return []
+    return [(cfg, e) for e in (sc.values() if isinstance(sc, dict) else []) if isinstance(e, dict)]
+
+
+def steam_shortcuts(roots: Iterable[Path] | None = None) -> list[tuple[Path, dict]]:
+    """Every (user config folder, shortcut) in Steam's saved shortcut lists."""
+    return [item for cfg in steam_user_config_dirs(roots) for item in _user_shortcuts(cfg)]
+
+
+def _unquote(v: object) -> str:
+    return str(v).strip().strip('"')
+
+
+def _runs(e: dict, launcher: str) -> bool:
+    return bool(launcher) and launcher in str(e.get("Exe", ""))
+
+
+def find_shortcut(launcher: str, roots: Iterable[Path] | None = None, appid: int = 0,
+                  entries: list[tuple[Path, dict]] | None = None) -> int:
     """The appid of the Steam shortcut that runs `launcher` (or has `appid`), or 0 if there is none."""
-    for cfg in steam_user_config_dirs(roots):
-        try:
-            sc = vdf_loads((cfg / "shortcuts.vdf").read_bytes()).get("shortcuts", {})
-        except (OSError, ValueError):
-            continue
-        for e in sc.values():
-            if not isinstance(e, dict):
-                continue
-            aid = _entry_appid(e)
-            if (appid and aid == appid) or (launcher and launcher in str(e.get("Exe", ""))):
-                return aid
+    for _cfg, e in steam_shortcuts(roots) if entries is None else entries:
+        aid = _entry_appid(e)
+        if (appid and aid == appid) or _runs(e, launcher):
+            return aid
     return 0
 
 
 def in_steam(app: App, roots: Iterable[Path] | None = None) -> bool:
-    """Is the program's shortcut in any Steam user's library?"""
+    """Is the program's shortcut in any Steam user's saved library?"""
     return bool(find_shortcut(app.launcher, roots, app.steam_appid))
+
+
+def shortcuts_saved_at(roots: Iterable[Path] | None = None) -> float:
+    """When Steam last saved a shortcut list (0 if it never has)."""
+    times = [0.0]
+    for cfg in steam_user_config_dirs(roots):
+        try:
+            times.append((cfg / "shortcuts.vdf").stat().st_mtime)
+        except OSError:
+            pass
+    return max(times)
+
+
+def steam_state(app: App, roots: Iterable[Path] | None = None, running: bool | None = None,
+                entries: list[tuple[Path, dict]] | None = None) -> str:
+    """"in": Steam's saved list has it. "sent": it was handed to the running Steam, which hasn't
+    saved its list since, so we can't see it yet (sending it again would make a duplicate).
+    "out": not in Steam."""
+    if find_shortcut(app.launcher, roots, app.steam_appid, entries):
+        return "in"
+    if app.steam_added == "requested" and app.steam_requested_at:
+        if running is None:
+            running = steam_is_running()
+        if running and shortcuts_saved_at(roots) < app.steam_requested_at:
+            return "sent"
+    return "out"
+
+
+def sync_steam_appid(app: App, entries: list[tuple[Path, dict]]) -> bool:
+    """Steam may give a shortcut its own id: adopt the id of the shortcut that runs our launcher
+    (artwork is stored under it). True if the app changed."""
+    ids = [_entry_appid(e) for _cfg, e in entries if _runs(e, app.launcher)]
+    if not ids:
+        return False
+    changed = False
+    if app.steam_appid not in ids:
+        app.steam_appid, changed = ids[0], True
+    if app.steam_added == "requested":  # Steam has saved it since: it arrived
+        app.steam_added, app.steam_requested_at, changed = "live", 0.0, True
+    return changed
 
 
 # ── Adding to Steam ──────────────────────────────────────────────────────────
 #
-# Steam keeps its shortcuts in memory and writes shortcuts.vdf back when it exits, so editing the
-# file while Steam runs is undone by the next restart. While Steam is running we therefore ask
-# Steam itself to add the program (steam://addnonsteamgame/<.desktop file>, what SteamOS's own
-# "Add to Steam" does) and check that it landed; the file is only edited when Steam is closed, or
-# as a last resort.
+# Steam keeps its shortcuts in memory and writes shortcuts.vdf itself, so the file must never be
+# edited while Steam runs: the edit is either lost when Steam saves, or merged into its own list as
+# duplicates. While Steam is running we ask Steam itself to add the program
+# (steam://addnonsteamgame/<.desktop file>, what SteamOS's own "Add to Steam" does) — once — and
+# remember that we did. The file is only edited while Steam is closed.
 
 def desktop_entry_path(app: App) -> Path:
     base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
@@ -1564,43 +1768,83 @@ def request_steam_add(desktop_file: Path) -> bool:
     return False
 
 
+STEAM_ADD_WAIT = 12.0  # seconds to watch for Steam saving a shortcut we handed it
+
+
 def add_shortcut(name: str, exe: str, start_dir: str, icon: str = "", desktop_file: Path | None = None,
                  roots: Iterable[Path] | None = None, running: bool | None = None,
-                 wait: float = 12.0) -> tuple[int, str]:
-    """Add a non-Steam shortcut. Returns (appid, how): how is "live" when the running Steam
-    confirmed it, "file" when shortcuts.vdf was edited, "" when there's no Steam account."""
+                 wait: float | None = None) -> tuple[int, str]:
+    """Add a non-Steam shortcut, without ever making a duplicate. Returns (appid, how):
+    "live"         Steam has it (it was already there, or the running Steam added it and saved),
+    "requested"    handed to the running Steam, which hasn't saved its list yet (appid is a guess),
+    "file"         Steam is closed, so its shortcut file was edited (Steam loads it on start),
+    "unavailable"  Steam is running but couldn't be reached; nothing was changed,
+    ""             there's no Steam account."""
     roots = list(steam_roots() if roots is None else roots)
+    existing = find_shortcut(exe, roots) if exe else 0
+    if existing:
+        return existing, "live"  # never a second copy
     if running is None:
         running = steam_is_running()
-    if running and exe:
+    if running:
+        if not exe:
+            return 0, ""
         if desktop_file is None or not desktop_file.exists():
             desktop_file = write_desktop_file(Path("/tmp") / f"protonlaunch-{slugify(name)}.desktop",
                                               name, exe, start_dir, icon)
-        if request_steam_add(desktop_file):
-            deadline = time.monotonic() + wait
-            while time.monotonic() < deadline:
-                appid = find_shortcut(exe, roots)
-                if appid:
-                    return appid, "live"
-                time.sleep(0.3)
+        if not request_steam_add(desktop_file):
+            return 0, "unavailable"
+        deadline = time.monotonic() + (STEAM_ADD_WAIT if wait is None else wait)
+        while time.monotonic() < deadline:
+            appid = find_shortcut(exe, roots)
+            if appid:
+                return appid, "live"
+            time.sleep(0.3)
+        return shortcut_appid(f'"{exe}"', name), "requested"
     appid, users = add_steam_shortcut(name, exe, start_dir, icon=icon, roots=roots)
     return (appid, "file") if users else (0, "")
 
 
 def add_to_steam(app: App, roots: Iterable[Path] | None = None, running: bool | None = None,
-                 wait: float = 12.0) -> tuple[int, str]:
-    """Add an installed program to Steam (see add_shortcut)."""
+                 wait: float | None = None) -> tuple[int, str]:
+    """Add an installed program to Steam (see add_shortcut) and record the result on `app`."""
     entry = desktop_entry_path(app)
     if app.launcher and not entry.exists():
         entry = write_desktop_entry(app)
-    return add_shortcut(app.name, app.launcher, str(Path(app.exe).parent), app.icon, entry, roots, running, wait)
+    sent_at = time.time()
+    appid, how = add_shortcut(app.name, app.launcher, str(Path(app.exe).parent), app.icon, entry, roots,
+                              running, wait)
+    if how != "unavailable":  # (then nothing changed in Steam)
+        app.steam_appid = appid
+        app.steam_requested_at = sent_at if how == "requested" else 0.0
+    app.steam_added = how
+    return appid, how
 
 
-def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None) -> None:
+def remove_shortcuts_for(launcher: str, appid: int, roots: Iterable[Path] | None = None) -> None:
+    """Remove the shortcut(s) that run `launcher` or have `appid` — only while Steam is closed."""
+    for cfg in steam_user_config_dirs(roots):
+        if not (cfg / "shortcuts.vdf").exists():
+            continue
+        try:
+            _edit_shortcuts(cfg, lambda es: [e for e in es if not (
+                (appid and _entry_appid(e) == appid) or _runs(e, launcher))])
+        except (OSError, ValueError, TypeError):
+            continue
+
+
+def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None, running: bool | None = None) -> bool:
     """Remove the program's files (prefix, plus its folder on D: if it was installed there),
-    its Steam shortcut, icon, artwork, launcher and log."""
-    if app.steam_appid:
-        remove_steam_shortcut(app.steam_appid, roots)
+    its Steam shortcut, icon, artwork, launcher and log. Returns True if its Steam shortcut was
+    left for the user to remove in Steam (Steam is running, and would undo an edit)."""
+    left_in_steam = False
+    if app.steam_appid or app.launcher:
+        if running is None:
+            running = steam_is_running()
+        if running:
+            left_in_steam = bool(find_shortcut(app.launcher, roots, app.steam_appid)) or app.steam_added == "requested"
+        else:
+            remove_shortcuts_for(app.launcher, app.steam_appid, roots)
     remove_desktop_entry(app)
     for d in safe_extra_dirs(app):
         shutil.rmtree(d, ignore_errors=True)
@@ -1614,6 +1858,63 @@ def uninstall(app: App, paths: Paths, roots: Iterable[Path] | None = None) -> No
         except OSError:
             pass
     Library(paths).remove(app.id)
+    return left_in_steam
+
+
+# ── Duplicate shortcuts ──────────────────────────────────────────────────────
+
+
+def _duplicate_key(e: dict, launchers: Path | None) -> tuple:
+    exe = _unquote(e.get("Exe", ""))
+    if launchers is not None and exe and Path(exe).parent == launchers:
+        return ("launcher", exe)  # one ProtonLaunch program: one shortcut, whatever it's called
+    return ("same", exe, _unquote(e.get("StartDir", "")), str(e.get("LaunchOptions", "")),
+            str(e.get("AppName", e.get("appname", ""))))
+
+
+def _duplicates(entries: list[dict], launchers: Path | None, keep: set[int] = frozenset()) -> set[int]:
+    """Indexes of repeated shortcuts. The first of each is kept, unless a later one has an id in `keep`."""
+    chosen: dict[tuple, int] = {}
+    for i, e in enumerate(entries):
+        k = _duplicate_key(e, launchers)
+        if k not in chosen or (_entry_appid(e) in keep and _entry_appid(entries[chosen[k]]) not in keep):
+            chosen[k] = i
+    return set(range(len(entries))) - set(chosen.values())
+
+
+def find_duplicate_shortcuts(roots: Iterable[Path] | None = None, launchers: Path | None = None) -> list[str]:
+    """The names of the extra copies of shortcuts in Steam's saved lists (one name per extra copy)."""
+    out = []
+    for cfg in steam_user_config_dirs(roots):
+        entries = [e for _c, e in _user_shortcuts(cfg)]
+        out += [str(entries[i].get("AppName", entries[i].get("appname", "?")))
+                for i in sorted(_duplicates(entries, launchers))]
+    return out
+
+
+def remove_duplicate_shortcuts(roots: Iterable[Path] | None = None, launchers: Path | None = None,
+                               keep: Iterable[int] = ()) -> int:
+    """Remove the extra copies (only while Steam is closed), keeping a backup of each list first.
+    `keep`: shortcut ids to prefer when choosing which copy stays. Returns how many were removed."""
+    keep = {int(k) & 0xFFFFFFFF for k in keep if k}
+    removed = 0
+
+    def dedupe(entries: list[dict]) -> list[dict]:
+        drop = _duplicates(entries, launchers, keep)
+        return [e for i, e in enumerate(entries) if i not in drop]
+
+    for cfg in steam_user_config_dirs(roots):
+        f = cfg / "shortcuts.vdf"
+        extra = len(_duplicates([e for _c, e in _user_shortcuts(cfg)], launchers, keep))
+        if not extra:
+            continue
+        try:
+            shutil.copy2(f, f.with_suffix(".vdf.before-dedupe"))
+            _edit_shortcuts(cfg, dedupe)
+        except (OSError, ValueError, TypeError):
+            continue
+        removed += extra
+    return removed
 
 
 def steam_grid_dirs(roots: Iterable[Path] | None = None) -> list[Path]:
@@ -1664,13 +1965,15 @@ def default_installer_dirs() -> list[Path]:
     return [home / "Downloads", home / "Desktop", *removable_media()]
 
 
-def installer_files(installer: Path) -> list[Path]:
-    """The setup file plus its data parts (GOG-style 'setup_x-1.bin', 'setup_x-2.bin', …)."""
+def installer_files(installer: Path, siblings: Iterable[Path] | None = None) -> list[Path]:
+    """The setup file plus its data parts (GOG-style 'setup_x-1.bin', 'setup_x-2.bin', …).
+    `siblings`: the folder's files, when the caller already listed them (saves a listing per file)."""
     installer = Path(installer)
     files = [installer] if installer.exists() else []
     pat = re.compile(re.escape(installer.stem) + r"(-\d+)?\.bin", re.I)
     try:
-        files += sorted(p for p in installer.parent.iterdir() if p != installer and pat.fullmatch(p.name))
+        others = installer.parent.iterdir() if siblings is None else siblings
+        files += sorted(p for p in others if p != installer and pat.fullmatch(p.name))
     except OSError:
         pass
     return files
@@ -1731,7 +2034,8 @@ def find_installers(
                     st = p.stat()
                 except OSError:
                     continue
-                found[p] = FoundInstaller(p, files_size(installer_files(p)), st.st_mtime)
+                parts = [Path(dirpath) / n for n in filenames if n.lower().endswith(".bin")]
+                found[p] = FoundInstaller(p, files_size(installer_files(p, parts)), st.st_mtime)
     return sorted(found.values(), key=lambda i: i.mtime, reverse=True)[:limit]
 
 
@@ -1834,8 +2138,23 @@ def _pe_icon(d) -> bytes | None:
 
 
 def steam_is_running() -> bool:
+    """Is the Steam client running? Reads /proc directly (and asks pgrep too): guessing "no" while
+    Steam runs would mean editing its shortcut list behind its back."""
+    if in_game_mode():
+        return True  # Game Mode is Steam
+    uid = os.getuid()
     try:
-        return subprocess.run(["pgrep", "-x", "steam"], stdout=subprocess.DEVNULL,
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        pids = []
+    for pid in pids:
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() == "steam" and os.stat(f"/proc/{pid}").st_uid == uid:
+                return True
+        except OSError:
+            continue
+    try:
+        return subprocess.run(["pgrep", "-x", "-u", str(uid), "steam"], stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL).returncode == 0
     except OSError:
         return False
