@@ -1,3 +1,3 @@
 """Deckhand — install Windows programs and set up game streaming on Steam Deck, straight into Steam."""
 
-__version__ = "3.1.2"
+__version__ = "3.2.0"

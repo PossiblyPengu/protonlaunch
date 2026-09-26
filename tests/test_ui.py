@@ -511,6 +511,30 @@ class TestWindow(Env):
         self.win.remove_duplicates()
         self.assertEqual(self.asked[-1], "No duplicates")
 
+    def test_install_screen_shows_what_has_been_written(self):
+        page = self.win.progress
+        inst = self.add_installer("Big Game Setup.exe", 10)
+        page.reset(inst)
+        page.expected = 4 << 30  # a 4 GB installer
+        page.on_status("Running the installer", "installer")
+        self.assertIsNotNone(page.meter)
+        free = {"v": 100 << 30}
+        page.meter = core.WriteMeter([self.home], now=0.0, free=lambda p: free["v"])
+        free["v"] -= 1 << 30
+        page._show_written(*page.meter.sample(now=10.0))
+        self.assertIn("1.0 GB written", page.written.text())
+        self.assertIn("about 25%", page.written.text())
+        self.assertEqual((page.bar.maximum(), page.bar.value()), (100, 25))
+        page.meter.last_growth -= 120  # nothing written for two minutes: probably waiting for the user
+        page._show_written(*page.meter.sample(now=11.0))
+        self.assertFalse(page.idle.isHidden())
+        self.assertIn("waiting for you", page.idle.text())
+        page.on_status("Finding the installed program…", "scan")
+        self.assertIn("installed", page.written.text())
+        self.assertTrue(page.idle.isHidden())
+        self.assertEqual(page.bar.maximum(), 0)  # busy again
+        page.stop()
+
     def test_long_paths_never_widen_the_window(self):
         deep = self.downloads.joinpath(*[f"A Rather Long Folder Name Number {i}" for i in range(8)])
         deep.mkdir(parents=True)

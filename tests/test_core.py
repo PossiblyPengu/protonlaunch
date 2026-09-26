@@ -345,6 +345,37 @@ class TestVdf(unittest.TestCase):
             core.vdf_loads(b"\x00shortcuts\x00\x09x\x00\x08\x08")
 
 
+class TestProgress(unittest.TestCase):
+    def test_write_meter_counts_free_space_going_down(self):
+        free = {"home": 50_000_000_000}
+        m = core.WriteMeter([Path("/"), Path("/")], now=0.0, free=lambda p: free["home"])
+        self.assertEqual(len(m.drives), 1)  # the same drive is counted once
+        free["home"] -= 300 << 20
+        written, rate = m.sample(now=2.0)
+        self.assertEqual(written, 300 << 20)
+        self.assertAlmostEqual(rate, (300 << 20) / 2.0)
+        self.assertEqual(m.idle_for(now=2.0), 0.0)
+        written, rate = m.sample(now=62.0)  # nothing more written for a minute
+        self.assertEqual((written, m.idle_for(now=62.0)), (300 << 20, 60.0))
+        free["home"] += 1 << 30  # something else freed space: never negative
+        self.assertEqual(m.sample(now=63.0)[0], 0)
+
+    def test_install_estimate(self):
+        gb = 1 << 30
+        self.assertEqual(core.install_estimate(gb, 4 * gb), 25)
+        self.assertIsNone(core.install_estimate(5 * gb, 4 * gb))  # outgrew the estimate: no fake numbers
+        self.assertIsNone(core.install_estimate(1 << 20, 50 << 20))  # small installers: nothing to go on
+        self.assertEqual(core.install_estimate(4 * gb - 1, 4 * gb), 99)
+
+    def test_flatpak_progress(self):
+        from protonlaunch import streaming
+        p = streaming.FlatpakProgress()
+        self.assertIsNone(p.feed("Looking for matches…"))
+        self.assertEqual(p.feed("Installing 1/2… ████▌ 50%  3.1 MB/s  00:10"), 25)
+        self.assertEqual(p.feed("Installing 2/2… ██ 20%  2.0 MB/s"), 60)
+        self.assertEqual(p.feed("Installing 2/2… 100%"), 100)
+
+
 class TestSteamShortcuts(Env):
     def test_add_replace_remove(self):
         cfg = self.steam / "userdata/12345/config"

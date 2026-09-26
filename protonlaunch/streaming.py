@@ -206,7 +206,26 @@ def install_better_xcloud(dest: Path | None = None, fetch: Callable[[str], bytes
     return version
 
 
-def install_app(app_id: str, log: Callable[[str], None] = lambda s: None) -> None:
+class FlatpakProgress:
+    """Overall percent from flatpak's output: "Installing 2/3… ███ 45%" means 1 of 3 done plus 45% of
+    the second. flatpak redraws its progress line with \\r, so each redraw is fed separately."""
+
+    def __init__(self) -> None:
+        self.step, self.steps = 1, 1
+
+    def feed(self, text: str) -> int | None:
+        m = re.search(r"(\d+)/(\d+)", text)
+        if m and 0 < int(m.group(1)) <= int(m.group(2)):
+            self.step, self.steps = int(m.group(1)), int(m.group(2))
+        pct = re.findall(r"(\d{1,3})\s*%", text)
+        if not pct:
+            return None
+        part = min(100, int(pct[-1]))
+        return min(100, int(((self.step - 1) + part / 100) * 100 / self.steps))
+
+
+def install_app(app_id: str, log: Callable[[str], None] = lambda s: None,
+                progress: Callable[[int], None] = lambda pct: None) -> None:
     """Install a Flathub app for this user (no admin password), adding Flathub for the user if needed."""
     exe = _flatpak()
     if not exe:
@@ -219,13 +238,20 @@ def install_app(app_id: str, log: Callable[[str], None] = lambda s: None) -> Non
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
                             errors="replace")
     tail: list[str] = []
+    meter = FlatpakProgress()
     assert proc.stdout is not None
     with proc.stdout:
-        for line in proc.stdout:
-            line = line.strip()
-            if line:
-                tail = (tail + [line])[-8:]
-                log(line)
+        for raw in proc.stdout:
+            for line in raw.split("\r"):
+                line = line.strip()
+                if not line:
+                    continue
+                pct = meter.feed(line)
+                if pct is not None:
+                    progress(pct)
+                else:
+                    tail = (tail + [line])[-8:]
+                    log(line)
     if proc.wait() != 0:
         raise core.InstallError(f"Couldn't install {app_id} from Flathub (is the Deck online?).\n\n"
                                 + "\n".join(tail))
@@ -289,8 +315,12 @@ def set_up(svc: Service, paths: core.Paths, status: Callable[[str], None] = lamb
     installed = detect(installed_apps())
     need = needs(svc, installed, better_xcloud)
     if need:
+        report = getattr(status, "progress", lambda pct: None)
         status(f"Installing {app_name(need)} from Flathub…")
-        install_app(need, lambda line: status(f"Installing {app_name(need)} from Flathub…  {line[:60]}"))
+        report(-1)
+        install_app(need, lambda line: status(f"Installing {app_name(need)} from Flathub…  {line[:60]}"),
+                    lambda pct: (status(f"Installing {app_name(need)} from Flathub…  {pct}%"), report(pct)))
+        report(-1)
         installed = detect(installed_apps()) | {need}
     if better_xcloud:
         status("Installing Better xCloud…")

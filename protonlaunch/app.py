@@ -170,6 +170,7 @@ class Worker(QThread):
     """Runs fn(status) off the UI thread: adding to Steam can wait a few seconds for Steam."""
 
     status = pyqtSignal(str)
+    progress = pyqtSignal(int)  # percent, or -1 for "busy, no percentage"
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -178,8 +179,12 @@ class Worker(QThread):
         self.fn = fn
 
     def run(self) -> None:
+        def status(text: str) -> None:
+            self.status.emit(text)
+
+        status.progress = self.progress.emit  # jobs that can count report percentages here
         try:
-            self.done.emit(self.fn(self.status.emit))
+            self.done.emit(self.fn(status))
         except Exception as e:  # noqa: BLE001 — shown to the user
             self.failed.emit(str(e) or type(e).__name__)
 
@@ -251,6 +256,19 @@ class Page(QWidget):
 
     def scroll_area(self) -> QScrollArea | None:
         return self.findChild(QScrollArea)
+
+    def show_progress(self, pct: int) -> None:
+        """For pages with a `bar`: a percentage, -1 for busy, or None to hide it."""
+        bar = getattr(self, "bar", None)
+        if bar is None:
+            return
+        if pct is None:
+            bar.hide()
+            return
+        bar.setRange(0, 0 if pct < 0 else 100)
+        if pct >= 0:
+            bar.setValue(pct)
+        bar.show()
 
 
 class HomePage(Page):
@@ -508,9 +526,17 @@ class InstallPage(Page):
         self.bar.setRange(0, 0)
         self.bar.setTextVisible(False)
         lay.addWidget(self.bar)
+        self.written = label("", "dim")  # "1.2 GB written · 48 MB/s · about 35%"
+        self.written.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.written)
         self.elapsed = label("", "muted")
         self.elapsed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(self.elapsed)
+        self.idle = label("", "status")  # the installer seems to be waiting for the user
+        self.idle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.idle.setStyleSheet(f"color: {theme.ACCENT}; font-size: 17px;")
+        self.idle.hide()
+        lay.addWidget(self.idle)
         keep_open = label("Keep Deckhand open until this is done. If it does get closed, finish the "
                           "install later from Installed programs.", "muted")
         keep_open.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -531,10 +557,21 @@ class InstallPage(Page):
         row.addWidget(self.cancel_btn)
         lay.addLayout(row)
         self.started = 0.0
+        self.stage = ""
+        self.installer: Path | None = None
+        self.expected = 0  # the installer's own size: a rough floor for what gets installed
+        self.meter: core.WriteMeter | None = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
 
+    IDLE_HINT_AFTER = 45  # seconds without anything written while the installer runs
+
     def reset(self, installer: Path) -> None:
+        self.installer, self.stage, self.meter = Path(installer), "", None
+        self.expected = core.files_size(core.installer_files(Path(installer)))
+        self.written.setText("")
+        self.idle.hide()
+        self.bar.setRange(0, 0)
         self.heading.setText(f"Installing {core.guess_name(installer)}")
         self.source.setText(str(installer))
         self.steps.set_step(0)
@@ -549,8 +586,40 @@ class InstallPage(Page):
     def _tick(self) -> None:
         s = int(time.monotonic() - self.started)
         self.elapsed.setText(f"{s // 60}:{s % 60:02d} elapsed")
+        if self.meter is not None and self.stage in ("installer", "wait"):
+            self._show_written(*self.meter.sample())
+
+    def _show_written(self, written: int, rate: float) -> None:
+        pct = core.install_estimate(written, self.expected)
+        parts = [f"{core.human_size(written)} written"]
+        if rate >= 1 << 20:
+            parts.append(f"{core.human_size(int(rate))}/s")
+        if pct is not None:
+            parts.append(f"about {pct}% (estimated from the installer's size)")
+            self.bar.setRange(0, 100)
+            self.bar.setValue(pct)
+        else:
+            self.bar.setRange(0, 0)  # no estimate (small installer, or bigger than expected): just busy
+        self.written.setText("  ·  ".join(parts))
+        idle = self.meter.idle_for() if self.meter else 0
+        waiting = self.stage == "installer" and idle >= self.IDLE_HINT_AFTER
+        self.idle.setVisible(waiting)
+        if waiting:
+            how_long = f"{int(idle)} s" if idle < 120 else f"{int(idle // 60)} min"
+            self.idle.setText(f"Nothing new written for {how_long} — the installer may be waiting for you in "
+                              "its window.")
 
     def on_status(self, text: str, stage: str) -> None:
+        if stage == "installer" and self.meter is None:
+            # Start counting once Windows is set up, so only the installer's own writing counts.
+            places = [Path.home()] + ([self.installer.parent] if self.installer else [])
+            self.meter = core.WriteMeter(places)
+        if stage in ("scan", "steam") and self.stage in ("installer", "wait") and self.meter is not None:
+            written, _rate = self.meter.sample()
+            self.written.setText(f"{core.human_size(written)} installed")
+            self.idle.hide()
+            self.bar.setRange(0, 0)
+        self.stage = stage
         self.status.setText(text)
         self.steps.set_step(self.STEP_OF.get(stage, self.steps.current))
         self.continue_btn.setVisible(stage == "wait")
@@ -906,6 +975,10 @@ class StreamingPage(Page):
         lay.addWidget(self.list, 1)
         self.status = label("", "muted")
         lay.addWidget(self.status)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.hide()
+        lay.addWidget(self.bar)
         self.installed: set[str] | None = None  # Flatpak apps; read in the background
         self.steam: dict[str, str] = {}
         self.outside: dict[str, list[dict]] = {}  # service id → its Steam shortcuts made outside this app
@@ -1060,6 +1133,10 @@ class AddonsPage(Page):
         lay.addWidget(self.list, 1)
         self.status = label("", "muted")
         lay.addWidget(self.status)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.hide()
+        lay.addWidget(self.bar)
 
     def refresh(self) -> None:
         row = max(0, self.list.currentRow())
@@ -1104,6 +1181,7 @@ class AddonsPage(Page):
                      ("Open Decky's installer", "Cancel")) != 0:
             return
         self.status.setText("Downloading Decky's installer…")
+        self.show_progress(-1)
 
         def run(status):
             script = addons.fetch_decky_installer(self.win.paths.root / "downloads")
@@ -1112,6 +1190,7 @@ class AddonsPage(Page):
 
         def finished(_rc) -> None:
             self.status.setText("")
+            self.show_progress(None)
             v = addons.decky_version()
             self.win.flash(f"Decky Loader {v}" if v and v != "installed" else
                            "Decky Loader is installed" if v else "Decky Loader isn't installed", ms=5000)
@@ -1139,18 +1218,24 @@ class AddonsPage(Page):
         self.status.setText("Downloading EmuDeck…")
 
         def run(status):
+            report = getattr(status, "progress", lambda pct: None)
+
             def progress(done: int, total: int) -> None:
                 if total:
                     status(f"Downloading EmuDeck…  {core.human_size(done)} of {core.human_size(total)}")
+                    report(done * 100 // total)
+            report(-1)
             return addons.download_emudeck(progress)
 
         def finished(version: str) -> None:
             self.status.setText("")
+            self.show_progress(None)
             self.refresh()
             self.win.flash(f"EmuDeck {version} downloaded" if version else "EmuDeck downloaded")
             self._open_emudeck(a)
 
-        self.win.run_worker(run, finished, self._failed("EmuDeck"), status=self.status.setText, kind="addon")
+        self.win.run_worker(run, finished, self._failed("EmuDeck"), status=self.status.setText, kind="addon",
+                            progress=self.show_progress)
 
     def _open_emudeck(self, a: addons.Addon) -> None:
         if core.in_game_mode():
@@ -1165,6 +1250,7 @@ class AddonsPage(Page):
     def _failed(self, name: str):
         def failed(message: str) -> None:
             self.status.setText("")
+            self.show_progress(None)
             head, _, rest = message.partition("\n\n")
             Sheet.ask(self, f"Couldn't set up {name}", head, ("Close",), detail=rest)
             self.refresh()
@@ -1646,13 +1732,15 @@ class MainWindow(QMainWindow):
             return True
         return False
 
-    def run_worker(self, fn, on_done, on_failed, status=None, kind: str = "") -> None:
+    def run_worker(self, fn, on_done, on_failed, status=None, kind: str = "", progress=None) -> None:
         w = Worker(fn)
         w.kind = kind
         w.done.connect(on_done)
         w.failed.connect(on_failed)
         if status:
             w.status.connect(status)
+        if progress:
+            w.progress.connect(progress)
         w.finished.connect(w.deleteLater)
         w.finished.connect(lambda: self.workers.discard(w))
         self.workers.add(w)
@@ -1714,6 +1802,7 @@ class MainWindow(QMainWindow):
 
         def finished(app: core.App) -> None:
             page.status.setText("")
+            page.show_progress(None)
             page.installed = None  # re-read: something may have been installed
             self._write_art(app, None)
             msg = {"live": f"{app.name} is in your Steam library",
@@ -1731,12 +1820,13 @@ class MainWindow(QMainWindow):
 
         def failed(message: str) -> None:
             page.status.setText("")
+            page.show_progress(None)
             head, _, rest = message.partition("\n\n")
             Sheet.ask(self, f"Couldn't set up {svc.name}", head, ("Close",), detail=rest)
 
         self.run_worker(lambda status: streaming.set_up(svc, self.paths, status, better_xcloud=better_xcloud),
                         finished, failed,
-                        status=page.status.setText, kind="stream")
+                        status=page.status.setText, kind="stream", progress=page.show_progress)
 
     def check_leftovers(self) -> None:
         """Offer to delete prefixes left by interrupted installs (sized in the background)."""

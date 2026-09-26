@@ -1,5 +1,5 @@
 {
-  "version": "3.1.2",
-  "sha256": "ef39bb600ecc7837bdae1fa5b0c6740d6892725c5d9094fd490026f774d541d1",
-  "notes": "Xbox Cloud Gaming now says exactly which browser each choice uses: Google Chrome normally, Chromium with Better xCloud (Chrome can't load it) \u2014 and only that browser is installed."
+  "version": "3.2.0",
+  "sha256": "0ab4ffdc96d82045b29bb24c28c84152ff0940982c4292f5734104d3dee96cde",
+  "notes": "Install progress: see how much the installer has written and how fast, an estimated percentage for big installs, and a heads-up when the installer is waiting for you. Flathub and EmuDeck downloads now show a progress bar."
 }

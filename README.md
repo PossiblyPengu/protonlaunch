@@ -23,6 +23,7 @@ Built for the Deck: four sections down the left (**Install · Stream · Add-ons 
 - **Handles programs that need no install:** if the file *is* the program, it's added as-is — with its folder, if you want (portable programs usually need the files next to them).
 - **Picks up interrupted installs:** if an install never finished (Deckhand was closed mid-install, the Deck turned off…), it shows up under Installed programs as an unfinished install: **Finish setup** adds what it installed to Steam without reinstalling, or delete it to free the space. Deckhand also offers this when it opens, and never touches a folder whose installer is still running.
 - **Records DirectX setup errors:** if the installer runs Microsoft's DirectX setup, its own error log is copied into Deckhand's install log. (That setup often reports errors under Proton; Proton already includes DirectX, so programs usually run anyway.)
+- **Shows real progress:** how much the installer has written so far and how fast, with an estimate against the installer's size for big installs, and a heads-up when nothing is happening because the installer is waiting for you. Flathub and EmuDeck downloads show a percentage.
 - **Keeps the Deck awake while installing** (when the system allows it), so a long install isn't paused by sleep.
 
 ## Game streaming

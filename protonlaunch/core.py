@@ -1018,6 +1018,51 @@ def free_space(path: Path) -> int:
         return 0
 
 
+class WriteMeter:
+    """How much an installer has written so far, and how fast: measured as free space going down on
+    the drives it writes to (home, where C: and D: live, and the installer's own drive). Cheap enough
+    to check every second, however big the install; other activity on the Deck adds a little noise."""
+
+    def __init__(self, paths: Iterable[Path], now: float | None = None,
+                 free: Callable[[Path], int] | None = None):
+        self.free = free or free_space
+        self.drives: dict[object, Path] = {}
+        for p in paths:
+            try:
+                key: object = os.stat(p).st_dev
+            except OSError:
+                key = str(p)
+            self.drives.setdefault(key, Path(p))
+        self.base = {k: self.free(p) for k, p in self.drives.items()}
+        t = time.monotonic() if now is None else now
+        self.samples: collections.deque[tuple[float, int]] = collections.deque([(t, 0)], maxlen=8)
+        self.peak = 0
+        self.last_growth = t
+
+    def sample(self, now: float | None = None) -> tuple[int, float]:
+        """(bytes written so far, bytes per second over the last few seconds)."""
+        t = time.monotonic() if now is None else now
+        written = max(0, sum(self.base[k] - self.free(p) for k, p in self.drives.items()))
+        if written > self.peak + (1 << 20):  # growing (more than 1 MB since the last growth)
+            self.peak, self.last_growth = written, t
+        t0, w0 = self.samples[0]
+        self.samples.append((t, written))
+        rate = max(0.0, (written - w0) / (t - t0)) if t > t0 else 0.0
+        return written, rate
+
+    def idle_for(self, now: float | None = None) -> float:
+        """Seconds since the install last grew."""
+        return (time.monotonic() if now is None else now) - self.last_growth
+
+
+def install_estimate(written: int, expected: int) -> int | None:
+    """Percent done, estimated from the installer's own size (installs usually end up at least that big),
+    or None when there's nothing to go on or the install has outgrown the estimate."""
+    if expected < 100 << 20 or written >= expected:
+        return None
+    return min(99, int(written * 100 / expected))
+
+
 def human_size(n: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
