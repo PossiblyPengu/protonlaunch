@@ -174,3 +174,73 @@ def remove_files(files: list[str]) -> None:
             Path(f).unlink()
         except OSError:
             pass
+
+
+# ── Deckhand's own icon: "d." ────────────────────────────────────────────────
+#
+# Drawn from shapes rather than a font, so it looks the same on every system: a lowercase d (a ring
+# and a stem) in warm white, and the wordmark's coral full stop, on a graphite rounded square.
+
+LOGO_BG_TOP, LOGO_BG_BOTTOM = "#26282e", "#111214"
+LOGO_INK, LOGO_DOT = "#f4f1ec", "#ff6b4a"
+
+
+def draw_logo(p: QPainter, r: QRectF, background: bool = True) -> None:
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    s = min(r.width(), r.height())
+    x0, y0 = r.x() + (r.width() - s) / 2, r.y() + (r.height() - s) / 2
+    if background:
+        g = QLinearGradient(x0, y0, x0, y0 + s)
+        g.setColorAt(0, QColor(LOGO_BG_TOP))
+        g.setColorAt(1, QColor(LOGO_BG_BOTTOM))
+        bg = QPainterPath()
+        bg.addRoundedRect(QRectF(x0, y0, s, s), s * 0.22, s * 0.22)
+        p.fillPath(bg, g)
+    u = s / 100  # design grid: 100 × 100
+    t = 11 * u  # stroke weight
+    # the bowl: a ring, centred low-left
+    cx, cy, ro = x0 + 42 * u, y0 + 60 * u, 20 * u
+    bowl = QPainterPath()
+    bowl.addEllipse(QPointF(cx, cy), ro, ro)
+    hole = QPainterPath()
+    hole.addEllipse(QPointF(cx, cy), ro - t, ro - t)
+    bowl = bowl.subtracted(hole)
+    # the stem: from the ascender down to the baseline, on the bowl's right edge
+    stem = QPainterPath()
+    stem.addRoundedRect(QRectF(cx + ro - t, y0 + 20 * u, t, cy + ro - (y0 + 20 * u)), t / 2, t / 2)
+    p.fillPath(bowl.united(stem), QColor(LOGO_INK))
+    # the full stop
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(LOGO_DOT))
+    d = 7.5 * u
+    p.drawEllipse(QPointF(x0 + 76 * u, cy + ro - d), d, d)
+    p.restore()
+
+
+def logo_image(size: int = 256, background: bool = True) -> QImage:
+    img = QImage(size, size, QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    draw_logo(p, QRectF(0, 0, size, size), background)
+    p.end()
+    return img
+
+
+ICON_SIZES = (32, 48, 64, 128, 256, 512)
+
+
+def install_app_icon(data_home: Path | None = None) -> Path | None:
+    """Put the icon where the desktop finds it (~/.local/share/icons/hicolor/…/deckhand.png).
+    Returns the 256 px file, which Steam shortcuts and the menu entry point at."""
+    base = (data_home or Path.home() / ".local/share") / "icons/hicolor"
+    out = None
+    for n in ICON_SIZES:
+        f = base / f"{n}x{n}/apps/deckhand.png"
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            if logo_image(n).save(str(f), "PNG") and n == 256:
+                out = f
+        except OSError:
+            continue
+    return out

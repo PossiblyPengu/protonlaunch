@@ -535,6 +535,22 @@ class TestWindow(Env):
         self.assertEqual(page.bar.maximum(), 0)  # busy again
         page.stop()
 
+    def test_app_icon_is_installed_and_the_menu_entry_uses_it(self):
+        from protonlaunch import app as app_mod
+        apps = self.home / ".local/share/applications"
+        apps.mkdir(parents=True)
+        (apps / "protonlaunch.desktop").write_text("[Desktop Entry]\nName=ProtonLaunch\nIcon=applications-games\n")
+        app_mod.rename_menu_entry()
+        self.assertEqual((apps / "protonlaunch.desktop").read_text(),
+                         "[Desktop Entry]\nName=Deckhand\nIcon=deckhand\n")
+        for n in (32, 256, 512):
+            icon = self.home / f".local/share/icons/hicolor/{n}x{n}/apps/deckhand.png"
+            self.assertTrue(icon.exists(), n)
+        from PyQt6.QtGui import QImage
+        img = QImage(str(self.home / ".local/share/icons/hicolor/256x256/apps/deckhand.png"))
+        self.assertEqual((img.width(), img.height()), (256, 256))
+        self.assertFalse(self.qapp.windowIcon().isNull() and app_mod.app_icon().isNull())
+
     def test_long_paths_never_widen_the_window(self):
         deep = self.downloads.joinpath(*[f"A Rather Long Folder Name Number {i}" for i in range(8)])
         deep.mkdir(parents=True)

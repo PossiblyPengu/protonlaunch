@@ -100,15 +100,31 @@ def add_deckhand_command() -> None:
             pass
 
 
+def app_icon() -> QIcon:
+    icon = QIcon()
+    for n in artwork.ICON_SIZES:
+        icon.addPixmap(QPixmap.fromImage(artwork.logo_image(n)))
+    return icon
+
+
 def rename_menu_entry() -> None:
-    """Installs from before the rename have a Desktop Mode menu entry called ProtonLaunch."""
-    entry = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "applications/protonlaunch.desktop"
-    try:
-        text = entry.read_text(encoding="utf-8")
-        if "Name=ProtonLaunch" in text:
-            entry.write_text(text.replace("Name=ProtonLaunch", "Name=Deckhand"), encoding="utf-8")
-    except OSError:
-        pass
+    """Keep the Desktop Mode menu entry current: installs from before the rename call it ProtonLaunch,
+    and entries from before 3.3 use a generic icon instead of Deckhand's own."""
+    data = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    if not (data / "icons/hicolor/256x256/apps/deckhand.png").exists():
+        artwork.install_app_icon(data)
+    for name in ("deckhand.desktop", "protonlaunch.desktop"):
+        entry = data / "applications" / name
+        try:
+            text = entry.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        new = text.replace("Name=ProtonLaunch", "Name=Deckhand").replace("Icon=applications-games\n", "Icon=deckhand\n")
+        if new != text:
+            try:
+                entry.write_text(new, encoding="utf-8")
+            except OSError:
+                pass
 
 
 def glyph_icon(kind: str, color: str = theme.TEXT_DIM) -> QIcon:
@@ -1425,10 +1441,17 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(rail)
         v.setContentsMargins(0, 22, 0, 18)
         v.setSpacing(4)
+        brand = QHBoxLayout()
+        brand.setContentsMargins(22, 0, 0, 18)
+        brand.setSpacing(8)
+        logo = QLabel()
+        logo.setPixmap(QPixmap.fromImage(artwork.logo_image(30)))
+        brand.addWidget(logo)
         mark = QLabel(f'deckhand<span style="color:{theme.ACCENT}">.</span>')
         mark.setObjectName("wordmark")
-        mark.setContentsMargins(24, 0, 0, 18)
-        v.addWidget(mark)
+        brand.addWidget(mark)
+        brand.addStretch(1)
+        v.addLayout(brand)
         self.stations: dict[str, QPushButton] = {}
         for key, text, glyph in (("install", "Install", "download"), ("stream", "Stream", "signal"),
                                  ("addons", "Add-ons", "plus"), ("installed", "Installed", "stack")):
@@ -2139,7 +2162,7 @@ class MainWindow(QMainWindow):
             if how == "requested":
                 self.paths.remember(self_steam_requested_at=started)
             if how in ("live", "file", "requested"):
-                artwork.write_steam_artwork(appid, "Deckhand", None, core.steam_grid_dirs())
+                artwork.write_steam_artwork(appid, "Deckhand", artwork.logo_image(512), core.steam_grid_dirs())
             msg = {"live": "Done — Deckhand is in your Steam library.",
                    "file": "Done — Deckhand will be in your Steam library when Steam starts.",
                    "requested": "Sent to Steam — look in your library under Non-Steam.",
@@ -2148,7 +2171,8 @@ class MainWindow(QMainWindow):
                    }.get(how, "No Steam account found on this device.")
             Sheet.ask(self, "Add to Steam", msg, ("Close",))
 
-        self.run_worker(lambda _s: core.add_shortcut("Deckhand", str(exe), str(exe.parent)), finished,
+        icon = artwork.install_app_icon() or ""
+        self.run_worker(lambda _s: core.add_shortcut("Deckhand", str(exe), str(exe.parent), str(icon)), finished,
                         lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)), kind="steam")
 
     def open_files(self, files: list[str]) -> None:
@@ -2214,15 +2238,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Deckhand {__version__}")
         return 0
     if "-h" in args or "--help" in args:
-        print("usage: protonlaunch [INSTALLER.exe|.msi]\n"
-              "       protonlaunch --update\n\n"
+        print("usage: deckhand [INSTALLER.exe|.msi]\n"
+              "       deckhand --update\n\n"
               "Opens Deckhand. Given an installer, asks to install it right away.\n"
               "--update downloads and installs the newest Deckhand.")
         return 0
     if "--update" in args:
         return updater.cli_update(__version__)
+    if "--install-icon" in args:  # used by get.sh: put the app icon where the desktop finds it
+        from PyQt6.QtGui import QGuiApplication
+
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        gui = QGuiApplication(argv[:1])  # painting needs one
+        ok = gui is not None and artwork.install_app_icon() is not None
+        return 0 if ok else 1
     app = QApplication(argv[:1])
     app.setApplicationName("Deckhand")
+    app.setDesktopFileName("deckhand")
+    app.setWindowIcon(app_icon())
     files = [str(Path(a).resolve()) for a in args if not a.startswith("-")]
     if SingleInstance.hand_off(files):
         print("Deckhand is already open — passed it on.")

@@ -1,5 +1,5 @@
 {
-  "version": "3.2.0",
-  "sha256": "0ab4ffdc96d82045b29bb24c28c84152ff0940982c4292f5734104d3dee96cde",
-  "notes": "Install progress: see how much the installer has written and how fast, an estimated percentage for big installs, and a heads-up when the installer is waiting for you. Flathub and EmuDeck downloads now show a progress bar."
+  "version": "3.3.0",
+  "sha256": "7160c39fc8eb074e2bb3b05b63101b1357caa975d2a1e2cc1bea053ffe976a58",
+  "notes": "New app icon: the \"d.\" logo, used for the window, the Desktop Mode app menu, Deckhand's own Steam shortcut and its Steam artwork."
 }

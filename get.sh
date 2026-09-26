@@ -53,7 +53,7 @@ cat > "$DESKTOP_DIR/deckhand.desktop" << DESKTOP
 Name=Deckhand
 Comment=Install Windows programs, game streaming and add-ons on Steam Deck
 Exec=$BIN_DIR/deckhand %f
-Icon=applications-games
+Icon=deckhand
 Terminal=false
 Type=Application
 Categories=Game;Utility;
@@ -61,6 +61,7 @@ MimeType=application/x-ms-dos-executable;application/x-msdownload;application/vn
 StartupNotify=true
 DESKTOP
 chmod +x "$DESKTOP_DIR/deckhand.desktop"
+QT_QPA_PLATFORM=offscreen "$BIN_DIR/deckhand" --install-icon >/dev/null 2>&1 || true  # the "d." app icon
 update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
 
 echo ""

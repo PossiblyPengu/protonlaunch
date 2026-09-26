@@ -1,3 +1,5 @@
+<img src="assets/deckhand.png" width="96" alt="deckhand. logo">
+
 # deckhand.
 
 **Install Windows programs and games on your Steam Deck. Pick the installer; the program ends up in your Steam library.**
