@@ -340,6 +340,25 @@ class TestWindow(Env):
         finally:
             core.request_steam_add, core.STEAM_ADD_WAIT = orig_request, orig_wait
 
+    def test_leftovers_from_interrupted_installs_are_offered_for_deletion(self):
+        keep, gone = self.paths.prefixes / "kept-one", self.paths.prefixes / "cool-game"
+        for d in (keep, gone):
+            (d / "pfx").mkdir(parents=True)
+            (d / "pfx/big").write_bytes(b"x" * 1000)
+        self.answers = [1]  # Keep: never asked about these again
+        self.win.check_leftovers()
+        self.wait_for(lambda: "Unfinished installs" in self.asked)
+        self.assertTrue(keep.exists() and gone.exists())
+        self.asked.clear()
+        self.win.check_leftovers()
+        self.pump(20)
+        self.assertEqual(self.asked, [])
+        self.paths.remember(kept_leftovers=["kept-one"])
+        self.answers = [0]  # Delete
+        self.win.check_leftovers()
+        self.wait_for(lambda: not gone.exists())
+        self.assertTrue(keep.exists())
+
     def test_remove_duplicate_shortcuts_only_with_steam_closed(self):
         vdf = self.steam / "userdata/12345/config/shortcuts.vdf"
         e = {"appid": 1, "AppName": "Emu", "Exe": '"/emu"', "StartDir": '"/"', "LaunchOptions": ""}

@@ -921,6 +921,7 @@ class MainWindow(QMainWindow):
         if dupes:
             self.flash(f"Steam has {len(dupes)} duplicate shortcut{'s' * (len(dupes) != 1)} — "
                        "☰ Menu → Remove duplicate Steam shortcuts", ms=8000)
+        QTimer.singleShot(0, self.check_leftovers)
         if check_updates is None:
             check_updates = updater.self_path() is not None and not os.environ.get("PROTONLAUNCH_NO_UPDATE_CHECK")
         if check_updates:
@@ -1234,6 +1235,45 @@ class MainWindow(QMainWindow):
             return
         self.run_worker(run, finished, lambda m: Sheet.ask(self, "Couldn't add to Steam", m, ("Close",)),
                         kind="steam")
+
+    def check_leftovers(self) -> None:
+        """Offer to delete prefixes left by interrupted installs (sized in the background)."""
+        kept = set(self.paths.state().get("kept_leftovers", []))
+        dirs = [d for d in core.orphan_prefixes(self.paths) if d.name not in kept]
+        if not dirs or self.busy_with_quietly("leftovers"):
+            return
+
+        def finished(sizes: list[tuple[Path, int]]) -> None:
+            # An install may have started meanwhile: never offer its prefix.
+            busy = {self.pending.compat_dir.resolve()} if self.pending else set()
+            if self.thread is not None or Sheet.current is not None:
+                return
+            left = [(d, n) for d, n in sizes if d.exists() and d.resolve() not in busy
+                    and d in core.orphan_prefixes(self.paths)]
+            if not left:
+                return
+            total = sum(n for _d, n in left)
+            names = "\n".join(f"•  {d.name}  ({core.human_size(n)})" for d, n in left[:8])
+            if len(left) > 8:
+                names += f"\n…and {len(left) - 8} more"
+            choice = Sheet.ask(self, "Unfinished installs",
+                               f"These Windows folders are left over from installs that didn't finish (for "
+                               f"example, ProtonLaunch was closed during the install). Nothing in Steam uses "
+                               f"them.\n\n{names}\n\nDelete them to free {core.human_size(total)}?",
+                               ("Delete", "Keep"), primary=0, danger=(0,))
+            if choice == 0:
+                for d, _n in left:
+                    shutil.rmtree(d, ignore_errors=True)
+                self.flash(f"Freed {core.human_size(total)}")
+                self.refresh_space()
+            elif choice == 1:
+                self.paths.remember(kept_leftovers=sorted(kept | {d.name for d, _n in left}))
+
+        self.run_worker(lambda _s: [(d, core.dir_size(d)) for d in dirs], finished, lambda _m: None,
+                        kind="leftovers")
+
+    def busy_with_quietly(self, kind: str) -> bool:
+        return any(getattr(w, "kind", "") == kind for w in self.workers)
 
     def sync_steam_ids(self) -> None:
         """Steam may give a shortcut an id of its own, or save one we handed it later: follow it, so

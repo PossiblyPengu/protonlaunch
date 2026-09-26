@@ -1139,6 +1139,7 @@ class Installer:
         self._log_fh = None
         self._proc: subprocess.Popen | None = None
         self._cancelled = False
+        self._directx_logged = False
         self._skip_wait = False
         self.stage = "idle"
         self._env: dict[str, str] | None = None
@@ -1155,6 +1156,11 @@ class Installer:
             self._log_fh.write(msg.rstrip("\n") + "\n")
             self._log_fh.flush()
         self._log_cb(msg.rstrip("\n"))
+
+    def _log_directx(self, pfx: Path) -> None:
+        if not self._directx_logged and (text := directx_log(pfx)):
+            self._directx_logged = True
+            self._log("The installer ran DirectX setup; its log says:\n" + text)
 
     def _stream(self, cmd: list[str]) -> int:
         self._log("$ " + " ".join(shlex.quote(c) for c in cmd))
@@ -1295,6 +1301,7 @@ class Installer:
                       f"Install to C: or D: (both have {human_size(free_space(home))} free).")
             rc = self._stream(sleep_inhibitor() + run_command(self.runtime, target, entry=self.entry))
             self._log(f"Installer exited with code {rc}")
+            self._log_directx(pfx)
             if self._cancelled:
                 raise Cancelled()
 
@@ -1315,11 +1322,13 @@ class Installer:
             self._log("Candidates: " + ", ".join(f"{c.exe.name}={c.score:.0f}" for c in cands[:8]))
             return PendingInstall(app_id, name, self.installer, compat, self.runtime, cands, log_file, extra)
         except Cancelled:
+            self._log_directx(pfx)
             self._log("Cancelled.")
             self.close()
             shutil.rmtree(compat, ignore_errors=True)
             raise
         except InstallError:
+            self._log_directx(pfx)
             self.close()
             shutil.rmtree(compat, ignore_errors=True)
             raise
@@ -1490,6 +1499,37 @@ def dir_size(path: Path, limit: int = 500_000) -> int:
             except OSError:
                 pass
     return total
+
+
+def orphan_prefixes(paths: Paths) -> list[Path]:
+    """Prefixes no installed program uses: left by installs that were interrupted (ProtonLaunch
+    closed or killed mid-install, the Deck turned off…)."""
+    used = {Path(a.prefix).resolve() for a in Library(paths).load()}
+    try:
+        dirs = sorted(d for d in paths.prefixes.iterdir() if d.is_dir() and not d.is_symlink())
+    except OSError:
+        return []
+    return [d for d in dirs if d.resolve() not in used]
+
+
+def directx_log(pfx: Path, lines: int = 25) -> str:
+    """The end of the DirectX setup's own logs (DXError.log, DirectX.log in C:\\Windows), if any."""
+    out = []
+    windows = pfx / "drive_c" / "windows"
+    try:
+        logs = sorted(f for f in windows.iterdir() if f.name.lower() in ("dxerror.log", "directx.log"))
+    except OSError:
+        return ""
+    for f in logs:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if "\x00" in text[:200]:  # UTF-16
+            text = f.read_bytes().decode("utf-16", errors="replace")
+        tail = [ln.rstrip() for ln in text.splitlines() if ln.strip()][-lines:]
+        out.append(f"--- {f.name} (last {len(tail)} lines) ---\n" + "\n".join(tail))
+    return "\n".join(out)
 
 
 def app_size(app: App) -> int:

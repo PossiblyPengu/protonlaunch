@@ -1,5 +1,5 @@
 {
-  "version": "2.7.1",
-  "sha256": "170d7fafaf37cd627ecefedd4a31dadff69676c8bc6876e4d71293c6a2112f0a",
-  "notes": "Safety: in Game Mode ProtonLaunch always treats Steam as running, so it never edits Steam's shortcut list there. Install logs now record what happened to Steam's shortcut list. Includes 2.7.0's fix for duplicated Steam shortcuts and the new \u2630 Menu \u2192 Remove duplicate Steam shortcuts."
+  "version": "2.8.0",
+  "sha256": "7729b19beb23ef92928f485d8945e61f42ccaacbd8ffaf8c87953e93d393715f",
+  "notes": "Leftover Windows folders from installs that didn't finish are now found and offered for deletion. When an installer runs DirectX setup, its error log is copied into the install log. Includes 2.7.x's fixes for duplicated Steam shortcuts."
 }

@@ -407,6 +407,7 @@ class TestSteamShortcuts(Env):
         finally:
             proc.kill()
             proc.wait()
+            proc.stdout.close()
 
 
 class TestRuntimes(Env):
@@ -654,6 +655,24 @@ class TestInstallFlow(Env):
         self.assertTrue((self.home / "Games").exists())  # the standard folder itself is kept
         self.assertFalse(Path(app.prefix).exists())
         self.assertFalse(core.in_steam(app, [self.steam]))
+
+    def test_orphan_prefixes_are_the_ones_no_program_uses(self):
+        job = self.job()
+        pending = job.run()
+        app = job.finish(pending, pending.candidates[0].exe)
+        left = self.paths.prefixes / "cool-game-2"
+        (left / "pfx").mkdir(parents=True)
+        self.assertEqual(core.orphan_prefixes(self.paths), [left])
+        self.assertTrue(Path(app.prefix).exists())
+
+    def test_directx_log_is_read_even_in_utf16(self):
+        windows = self.tmp / "pfx/drive_c/windows"
+        windows.mkdir(parents=True)
+        self.assertEqual(core.directx_log(self.tmp / "pfx"), "")
+        (windows / "DXError.log").write_bytes("line one\r\nDXSetup: internal error 42\r\n".encode("utf-16"))
+        text = core.directx_log(self.tmp / "pfx")
+        self.assertIn("DXError.log", text)
+        self.assertIn("internal error 42", text)
 
     def test_program_dirs(self):
         h = self.home.resolve()
