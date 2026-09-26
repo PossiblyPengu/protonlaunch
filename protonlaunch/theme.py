@@ -29,7 +29,7 @@ QLabel#dim {{ color: {TEXT_DIM}; }}
 QLabel#status {{ font-size: 22px; }}
 QLabel#ok {{ font-size: 30px; font-weight: 700; color: {GREEN_HI}; }}
 QLabel#chip {{ background: {SURFACE}; color: {TEXT_DIM}; border-radius: 14px; padding: 4px 14px; font-size: 15px; }}
-QLabel#wordmark {{ font-size: 23px; font-weight: 800; letter-spacing: -0.5px; }}
+QLabel#wordmark {{ font-size: 26px; font-weight: 800; letter-spacing: -0.5px; }}
 QFrame#rail {{ background: {RAIL}; border-right: 1px solid {LINE}; }}
 QPushButton#station {{
   background: transparent; border: none; border-left: 4px solid transparent; border-radius: 0;

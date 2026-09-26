@@ -1,5 +1,5 @@
 {
-  "version": "3.3.0",
-  "sha256": "7160c39fc8eb074e2bb3b05b63101b1357caa975d2a1e2cc1bea053ffe976a58",
-  "notes": "New app icon: the \"d.\" logo, used for the window, the Desktop Mode app menu, Deckhand's own Steam shortcut and its Steam artwork."
+  "version": "3.3.1",
+  "sha256": "0eb26d73549899fba1d559d7e80a713f52c4995662b9d852a34736e0cc982940",
+  "notes": "The \"d.\" logo is now only the app icon; inside the app the side rail shows just the deckhand. title."
 }

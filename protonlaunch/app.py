@@ -1441,17 +1441,10 @@ class MainWindow(QMainWindow):
         v = QVBoxLayout(rail)
         v.setContentsMargins(0, 22, 0, 18)
         v.setSpacing(4)
-        brand = QHBoxLayout()
-        brand.setContentsMargins(22, 0, 0, 18)
-        brand.setSpacing(8)
-        logo = QLabel()
-        logo.setPixmap(QPixmap.fromImage(artwork.logo_image(30)))
-        brand.addWidget(logo)
         mark = QLabel(f'deckhand<span style="color:{theme.ACCENT}">.</span>')
         mark.setObjectName("wordmark")
-        brand.addWidget(mark)
-        brand.addStretch(1)
-        v.addLayout(brand)
+        mark.setContentsMargins(24, 0, 0, 18)
+        v.addWidget(mark)
         self.stations: dict[str, QPushButton] = {}
         for key, text, glyph in (("install", "Install", "download"), ("stream", "Stream", "signal"),
                                  ("addons", "Add-ons", "plus"), ("installed", "Installed", "stack")):
